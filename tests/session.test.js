@@ -92,9 +92,10 @@ test('skips, repeated reveal, and untouched position count once each', async () 
   assert.deepEqual(summary.puzzles, { presented: 3, attempted: 2, successes: 0, untouched: 1, success_ratio: 0 });
 });
 
-test('random fraction sampled once, concealed in views, revealed only on finish', async () => {
-  const random = () => 0.374;
-  const api = controller(new FakeCatalog(), random);
+test('random mode resamples a hidden probability for each item', async () => {
+  // Initial probability/outcome then one fresh probability/outcome per next item.
+  const values = [0.1, 0.2, 0.9, 0.8, 0.4, 0.3, 0.7, 0.6, 0.2, 0.1, 0.8, 0.9, 0.3, 0.4];
+  const api = controller(new FakeCatalog(), () => values.shift() ?? 0.9);
   let state = await api('session', { ...settings(), ratio_mode: 'random' });
   for (let i = 0; i < 6; i++) {
     assert.equal(state.settings.puzzle_fraction, undefined);
@@ -103,7 +104,7 @@ test('random fraction sampled once, concealed in views, revealed only on finish'
     state = await action(api, 'next', state);
   }
   const summary = await action(api, 'finish', state);
-  assert.equal(summary.puzzle_fraction, 0.374);
+  assert.equal(summary.puzzle_fraction, null);
   assert.equal(summary.overall.presented, 7);
   assert.equal(summary.overall.attempted, 6);
 });

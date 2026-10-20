@@ -87,7 +87,7 @@ For UI/code changes, edit, test, commit, and push; **no data re-preparation is n
 
 ## Training and scoring
 
-- Choose a fixed puzzle probability from 0–100%, or **Surprise me**. Random mode samples one uniform fraction on [0, 1) at session start; each item is an independent draw, not a quota. The fraction stays out of the UI until **Finish session**.
+- Choose a fixed puzzle probability from 0–100%, or **Surprise me**. In random mode, each item gets a fresh hidden probability sampled uniformly on [0, 1), then is independently chosen using that probability. The resulting puzzle/ordinary outcomes are independent with 50% marginal probability, with no session-wide rate to infer. Random mode does not reveal a single probability at the end because none is shared across the session.
 - Configure puzzle difficulty as **anchor ± margin**, e.g. **1700 ± 300**. Rating selection is exact and uniform across matching prepared puzzle records, not approximately bucketed.
 - Both kinds show the preceding opponent move, then let you move. Source/rating/type information is hidden in the UI until the attempt is scored.
 - Click/drag, or enter UCI notation: `e2e4`, `e1g1` (castling), `a7a8n` (underpromotion). Promotion choice, board flipping (**F** when not typing), and post-attempt line replay are supported.

@@ -254,9 +254,10 @@ function review(index) {
 function showSummary(summary) {
   showScreen('summary');
   $('overall-rate').textContent = percent(summary.overall.success_ratio);
-  $('revealed-fraction').textContent = percent(summary.puzzle_fraction, 2);
+  $('revealed-fraction').textContent = summary.ratio_mode === 'random'
+    ? 'Varies' : percent(summary.puzzle_fraction, 2);
   $('fraction-caption').textContent = summary.ratio_mode === 'random'
-    ? 'Hidden puzzle probability' : 'Configured puzzle probability';
+    ? 'Puzzle chance varies each item' : 'Configured puzzle probability';
   const seconds = summary.duration_seconds;
   $('session-duration').textContent = `${Math.floor(seconds / 60)}m ${String(seconds % 60).padStart(2, '0')}s`;
   $('summary-rows').replaceChildren();

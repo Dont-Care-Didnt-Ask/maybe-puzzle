@@ -153,7 +153,7 @@ export class Session {
     if (!puzzles.length && (this.settings.ratio_mode === 'random' || this.settings.puzzle_fraction > 0)) {
       fail('No puzzles match anchor ± margin. Widen the margin.');
     }
-    this.fraction = this.settings.ratio_mode === 'random' ? random() : this.settings.puzzle_fraction;
+    this.fraction = this.settings.ratio_mode === 'random' ? null : this.settings.puzzle_fraction;
     this.decks = { puzzle: new Deck(puzzles, random), ordinary: new Deck(catalog.refs('ordinary', this.settings), random) };
     this.counts = { puzzle: { presented: 0, attempted: 0, successes: 0 }, ordinary: { presented: 0, attempted: 0, successes: 0 } };
     this.revision = 0;
@@ -163,7 +163,10 @@ export class Session {
 
   reserveNext() {
     if (!this.pending) {
-      const kind = this.random() < this.fraction ? 'puzzle' : 'ordinary';
+      // In random mode, redraw the hidden probability for every item. Marginally,
+      // outcomes are independent Bernoulli(0.5), without a session-wide rate to infer.
+      const fraction = this.fraction ?? this.random();
+      const kind = this.random() < fraction ? 'puzzle' : 'ordinary';
       this.pending = { kind, ref: this.decks[kind].draw() };
     }
     return this.pending;
