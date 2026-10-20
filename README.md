@@ -1,4 +1,4 @@
-# Chess: Puzzle / Not Puzzle
+# Maybe Puzzle
 
 Chess training without knowing whether there is a tactic. Solve a Lichess puzzle, or make a sound move in an ordinary game position. The board does not tell you which kind you are seeing.
 
