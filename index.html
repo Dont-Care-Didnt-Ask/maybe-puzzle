@@ -1,0 +1,112 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <meta name="theme-color" content="#191c20" />
+  <meta name="description" content="Chess training without knowing whether there is a tactic. Calculate honestly, or play a sound move." />
+  <title>Puzzle / Not Puzzle — Chess training</title>
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Ctext y='.9em' font-size='60'%3E♞%3C/text%3E%3C/svg%3E" />
+</head>
+<body>
+  <div class="page">
+    <header class="site-header">
+      <div class="brand"><span aria-hidden="true" class="brand-mark">♞</span><div><h1>Puzzle <span>/</span> Not Puzzle</h1><p>Calculate without the guarantee.</p></div></div>
+      <span class="tag">A chess training experiment</span>
+    </header>
+
+    <div id="error" role="alert" class="error" hidden></div>
+
+    <main>
+      <section id="setup" class="setup-layout" aria-labelledby="setup-title">
+        <div class="intro">
+          <p class="eyebrow">The position doesn't tell you.</p>
+          <h2 id="setup-title">Is there a tactic,<br />or just a good move?</h2>
+          <p>Some positions have a precise solution. Others just need a sound move. You won't be told which is which.</p>
+          <ol class="how-it-works">
+            <li><span>01</span><div><strong>Look at the board.</strong><p>Not every tempting sacrifice works.</p></div></li>
+            <li><span>02</span><div><strong>Calculate, then commit.</strong><p>Solve the tactic, or play an okay move.</p></div></li>
+            <li><span>03</span><div><strong>Finish when you like.</strong><p>See your results and uncover the mixture.</p></div></li>
+          </ol>
+        </div>
+        <form id="settings-form" class="panel settings">
+          <h3>Your session</h3>
+          <fieldset>
+            <legend>Puzzle probability</legend>
+            <label class="radio-card"><input type="radio" name="ratio_mode" value="random" checked /><span><strong>Surprise me</strong><small>A fraction sampled uniformly from 0–100%, hidden until you finish.</small></span></label>
+            <label class="radio-card"><input type="radio" name="ratio_mode" value="fixed" /><span><strong>Choose a fraction</strong><small>Each new position is an independent draw.</small></span></label>
+            <div id="fixed-controls" class="range-control" hidden>
+              <label for="fraction">Puzzles <output id="fraction-output" for="fraction">50%</output></label>
+              <input id="fraction" name="fraction" type="range" min="0" max="100" step="1" value="50" />
+              <div class="range-labels"><span>All ordinary</span><span>All puzzles</span></div>
+            </div>
+          </fieldset>
+          <fieldset>
+            <legend>Puzzle difficulty</legend>
+            <div class="rating-inputs">
+              <label for="anchor">Anchor rating<input id="anchor" name="anchor" type="number" value="1700" min="400" max="3500" step="1" required /></label>
+              <span class="plus-minus" aria-hidden="true">±</span>
+              <label for="margin">Margin<input id="margin" name="margin" type="number" value="300" min="0" max="1500" step="1" required /></label>
+            </div>
+            <p id="rating-range" class="help">Lichess puzzle ratings 1400–2000</p>
+          </fieldset>
+          <button id="start" class="primary large" type="submit" disabled>Start session <span aria-hidden="true">→</span></button>
+          <p class="help centered">No account or saved history. Reloading clears your session.</p>
+          <p id="data-status" class="data-status" role="status">Checking training data…</p>
+        </form>
+        <details class="rules">
+          <summary>What counts as success?</summary>
+          <p><strong>Puzzles:</strong> follow the published Lichess solution, including all your moves in the line. The opponent replies automatically. Equivalent alternatives are not accepted in this MVP.</p>
+          <p><strong>Ordinary positions:</strong> play a legal move no more than 0.5 pawns below Stockfish's best precomputed evaluation. Every legal move is graded offline; each position has at least two accepted moves. This engine-based filter is approximate; “ordinary” does not mean “no tactics.”</p>
+          <p>Your first attempt determines the score. You can retry a mistake, but credit is not restored. Skipping, revealing the answer, and finishing a started-but-unfinished attempt count as unsuccessful. Untouched positions are not scored.</p>
+          <p>Ordinary positions currently come from a random sample of high-rated Lichess games (both players at least 1800; the default source is an even stronger Elite subset).</p>
+          <p>This is a static, unrated self-training tool. The mixture and solutions are hidden in the interface, not secured against inspection in browser developer tools. Sessions exist only in this tab's memory.</p>
+        </details>
+      </section>
+
+      <section id="training" class="training-layout" aria-label="Training session" hidden>
+        <div class="board-column">
+          <div class="board-heading"><span id="side-to-move">White to move</span><button id="flip" class="text-button" type="button" title="Flip board (F)">Flip board ⇅</button></div>
+          <div id="board" class="cg-wrap" aria-label="Chessboard. Move pieces by clicking or dragging. You can also enter a UCI move below."></div>
+          <form id="move-form" class="move-entry"><label for="uci-move">Or enter a move</label><input id="uci-move" type="text" placeholder="e2e4" pattern="[a-h][1-8][a-h][1-8][qrbn]?" maxlength="5" autocomplete="off" autocapitalize="none" spellcheck="false" aria-label="Move in UCI notation, for example e2e4 or a7a8n" /><button id="play-move" type="submit">Play</button></form>
+        </div>
+        <aside class="session-sidebar">
+          <div class="panel session-panel">
+            <p class="eyebrow" id="position-number">Position 1</p>
+            <h2>What's your move?</h2>
+            <p class="session-prompt">Find the move you can justify. Calculate the whole line if there is one.</p>
+            <div id="feedback" class="feedback" role="status" aria-live="polite"><strong>Your turn</strong><p>Click or drag a piece to move.</p></div>
+            <p id="item-info" class="item-info" hidden></p>
+            <p id="played-moves" class="played-moves" aria-label="Moves played"></p>
+            <button id="next" class="primary large" type="button" title="Skipping an unfinished position counts as unsuccessful.">Skip position →</button>
+            <button id="reveal" class="secondary large" type="button">Show solution</button>
+            <div id="review" class="review" hidden>
+              <p id="review-label" class="eyebrow">Solution</p>
+              <div id="solution-moves" class="solution-moves"></div>
+              <div class="replay-controls"><button id="review-back" type="button" aria-label="Previous move">←</button><button id="review-start" type="button">Replay line</button><button id="review-forward" type="button" aria-label="Next move">→</button></div>
+            </div>
+          </div>
+          <div class="session-meta"><p id="session-mixture"></p><p id="session-difficulty"></p><p class="help">First attempts are scored. Finish a started position to avoid an unsuccessful attempt.</p></div>
+          <button id="finish" class="finish large" type="button">Finish session</button>
+          <p class="help centered">Finish to reveal the mixture. Reloading clears the session.</p>
+        </aside>
+      </section>
+
+      <section id="summary" class="panel summary-panel" aria-labelledby="summary-title" hidden>
+        <p class="eyebrow">Session complete</p>
+        <h2 id="summary-title">Now you know.</h2>
+        <div class="summary-highlights"><div><span id="overall-rate">—</span><p>Overall success</p></div><div><span id="revealed-fraction">—</span><p id="fraction-caption">Hidden puzzle probability</p></div><div><span id="session-duration">—</span><p>Time training</p></div></div>
+        <div class="table-scroll"><table><thead><tr><th scope="col">Position type</th><th scope="col">Shown</th><th scope="col">Success / attempted</th><th scope="col">Success rate</th></tr></thead><tbody id="summary-rows"></tbody></table></div>
+        <p id="summary-note" class="help"></p>
+        <p class="help">Each position was an independent draw. The observed mix need not match the session probability. Skips, revealed solutions, and started-but-unfinished attempts are unsuccessful; untouched positions are excluded from success rates.</p>
+        <button id="again" class="primary large" type="button">Configure a new session →</button>
+        <p class="help centered">Session cleared. No results were saved.</p>
+      </section>
+    </main>
+    <footer>Independent training tool, not affiliated with Lichess.<span><a href="https://database.lichess.org/" target="_blank" rel="noopener noreferrer">Lichess data</a> · <a href="./source.zip" download="chess-puzzle-not-puzzle-source.zip">Source & decisions (GPL-3.0)</a> · <a href="./licenses.txt" target="_blank" rel="noopener noreferrer">Licenses</a></span></footer>
+  </div>
+  <dialog id="promotion-dialog"><h3>Promote your pawn</h3><div id="promotion-options" class="promotion-options"></div><button id="promotion-cancel" class="text-button" type="button">Cancel move</button></dialog>
+  <noscript>This chess trainer needs JavaScript for its interactive board.</noscript>
+  <script type="module" src="./web/main.js"></script>
+</body>
+</html>
