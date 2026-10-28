@@ -2,7 +2,8 @@
 
 ## Browser components
 
-- **[Chessground](https://github.com/lichess-org/chessground)**, © Lichess contributors, GPL-3.0-or-later. Board interaction, brown board theme, and the bundled Cburnett piece stylesheet come from `@lichess-org/chessground`. Piece designs are by Colin M. L. Burnett.
+- **[Chessground](https://github.com/lichess-org/chessground)**, © Lichess contributors, GPL-3.0-or-later. Board interaction, brown board theme, and the bundled Cburnett piece stylesheet come from `@lichess-org/chessground`. Cburnett piece designs are by Colin M. L. Burnett (GPL-2.0-or-later).
+- **Additional Lichess piece themes:** Merida by Armando Hernandez Marroquin (GPL-2.0-or-later) and Chessnut by Alexis Luengas (Apache-2.0). All 24 SVGs are locally vendored, unmodified, from pinned Lila revision `aa97d4e2b760d0e74b1337a1fae9076e68830768`. See [theme provenance](public/themes/README.md), the pinned upstream [license/attribution table](public/themes/LICHESS-COPYING.md), and bundled full license texts. Noncommercial/restricted piece sets are not included. Additional board palettes are simple application-generated checkerboards, not reused Lila board textures.
 - **[chess.js](https://github.com/jhlywa/chess.js)**, © 2025 Jeff Hlywa and contributors, BSD-2-Clause. Legal moves, FEN, notation, castling, en passant, promotions, and review-line playback.
 - **[fflate](https://github.com/101arrowz/fflate)**, © 2026 Arjun Barrett, MIT. Portable gzip shard decoding in the browser and static source-ZIP generation during builds.
 

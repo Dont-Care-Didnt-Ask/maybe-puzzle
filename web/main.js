@@ -1,6 +1,7 @@
 import { Chessground } from '@lichess-org/chessground';
 import { Catalog } from './catalog.js';
 import { createController } from './session.js';
+import { initThemes } from './themes.js';
 import './style.css';
 
 const $ = (id) => document.getElementById(id);
@@ -321,7 +322,7 @@ $('review-forward').addEventListener('click', () => review((reviewIndex ?? 0) + 
 $('promotion-cancel').addEventListener('click', () => $('promotion-dialog').close(''));
 $('again').addEventListener('click', () => { clearError(); showScreen('setup'); });
 document.addEventListener('keydown', (event) => {
-  if (busy || !state || ['INPUT', 'TEXTAREA', 'BUTTON'].includes(document.activeElement.tagName)) return;
+  if (busy || !state || ['INPUT', 'TEXTAREA', 'BUTTON', 'SELECT', 'SUMMARY'].includes(document.activeElement.tagName)) return;
   if (event.key.toLowerCase() === 'f') $('flip').click();
   if (reviewIndex !== null && ['ArrowLeft', 'ArrowRight'].includes(event.key)) {
     event.preventDefault();
@@ -346,5 +347,6 @@ async function init() {
   } finally { setBusy(false); }
 }
 
+initThemes();
 settingsChanged();
 init();
