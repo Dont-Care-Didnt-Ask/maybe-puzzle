@@ -1,34 +1,43 @@
 import { Chess, play, reviewLine, uciOf } from './chess.js';
+import { validateCompactGroup } from './data-layout.js';
 
 export function assert(condition, message) {
   if (!condition) throw new Error(`Invalid training data: ${message}`);
 }
 
 export function validateManifest(manifest) {
-  assert([1, 2].includes(manifest.schema) && manifest.tolerance_cp === 50, 'unsupported schema or threshold');
+  assert(manifest && typeof manifest === 'object' && !Array.isArray(manifest)
+    && [1, 2, 3].includes(manifest.schema) && manifest.tolerance_cp === 50, 'unsupported schema or threshold');
   assert(typeof manifest.dataset_id === 'string' && manifest.dataset_id.length > 0, 'missing dataset ID');
   assert(typeof manifest.engine === 'string' && manifest.engine.length > 0, 'missing engine name');
-  assert(Number.isInteger(manifest.nodes) && manifest.nodes > 0, 'invalid search budget');
-  assert(Number.isInteger(manifest.sampled_games) && manifest.sampled_games > 0, 'invalid source-game count');
+  assert(Number.isSafeInteger(manifest.nodes) && manifest.nodes > 0, 'invalid search budget');
+  assert(Number.isSafeInteger(manifest.sampled_games) && manifest.sampled_games > 0, 'invalid source-game count');
   for (const [kind, prefix] of [['puzzles', 'p'], ['ordinary', 'n']]) {
     const group = manifest[kind];
-    assert(group && Number.isInteger(group.count) && group.count > 0, `empty ${kind}`);
+    if (manifest.schema === 3) {
+      validateCompactGroup(group, kind);
+      continue;
+    }
+    assert(group && typeof group === 'object' && !Array.isArray(group)
+      && Number.isSafeInteger(group.count) && group.count > 0, `empty ${kind}`);
     assert(Array.isArray(group.shards) && group.shards.length > 0, `missing ${kind} shards`);
     let total = 0;
     const files = new Set();
     for (const shard of group.shards) {
-      assert(new RegExp(`^${prefix}-[a-f0-9]{20}\\.json\\.gz$`).test(shard.file), 'unsafe shard filename');
+      assert(shard && typeof shard === 'object' && typeof shard.file === 'string' && shard.file.length === 30
+        && new RegExp(`^${prefix}-[a-f0-9]{20}\\.json\\.gz$`).test(shard.file), 'unsafe shard filename');
       assert(!files.has(shard.file), 'duplicate shard');
       files.add(shard.file);
-      assert(Number.isInteger(shard.count) && shard.count > 0, 'invalid shard size');
+      assert(Number.isSafeInteger(shard.count) && shard.count > 0, 'invalid shard size');
       if (kind === 'puzzles') {
-        if (manifest.schema === 2) assert(Number.isInteger(shard.rating), 'missing exact shard rating');
+        if (manifest.schema === 2) assert(Number.isSafeInteger(shard.rating), 'missing exact shard rating');
         else {
           assert(Array.isArray(shard.ratings) && shard.ratings.length === shard.count, 'missing rating index');
-          assert(shard.ratings.every(Number.isInteger), 'invalid rating');
+          assert(shard.ratings.every(Number.isSafeInteger), 'invalid rating');
         }
       }
       total += shard.count;
+      assert(Number.isSafeInteger(total), `${kind} count overflow`);
     }
     assert(total === group.count, `${kind} count mismatch`);
   }
@@ -39,7 +48,7 @@ export function validateManifest(manifest) {
 export function validatePuzzleShape(record, requireKey = false) {
   assert(record && typeof record.id === 'string' && record.id.length > 0, 'missing ID');
   assert(typeof record.fen === 'string' && /^[prnbqkPRNBQK1-8/]+ [wb] (?:-|[KQkq]+) (?:-|[a-h][36]) \d+ [1-9]\d*$/.test(record.fen), 'invalid puzzle FEN');
-  assert(Number.isInteger(record.rating) && Array.isArray(record.moves) && record.moves.length >= 2
+  assert(Number.isSafeInteger(record.rating) && Array.isArray(record.moves) && record.moves.length >= 2
     && record.moves.every((move) => typeof move === 'string' && /^[a-h][1-8][a-h][1-8][qrbn]?$/.test(move)), 'invalid puzzle');
   assert(record.url === undefined || typeof record.url === 'string', 'invalid source URL');
   if (requireKey || record.position_key !== undefined) {

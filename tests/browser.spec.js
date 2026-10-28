@@ -3,10 +3,12 @@ import path from 'node:path';
 import { gunzipSync, unzipSync } from 'fflate';
 import { expect, test } from '@playwright/test';
 import { Chess, play as chessMove } from '../web/chess.js';
-import { makeAssets } from './data-fixtures.js';
+import { makeAssets, makeSchema3Assets } from './data-fixtures.js';
 import { ordinary, puzzle, START } from './fixtures.js';
 
-const directory = 'dist/training';
+const dist = process.env.PLAYWRIGHT_DIST || 'dist';
+const directory = path.join(dist, 'training');
+const trainingPath = (pathname) => pathname.slice(pathname.indexOf('/training/') + '/training/'.length);
 const manifest = JSON.parse(fs.readFileSync(path.join(directory, 'manifest.json')));
 function initialFen(record) {
   const board = new Chess(record.fen);
@@ -16,32 +18,40 @@ function initialFen(record) {
 let errors, forbidden, requests;
 function sourceFor(kind, fen) {
   const group = manifest[kind === 'puzzle' ? 'puzzles' : 'ordinary'];
-  const fetched = new Set(requests.map((url) => path.basename(url)));
-  for (const shard of group.shards) {
-    if (!fetched.has(shard.file)) continue;
-    const records = JSON.parse(new TextDecoder().decode(gunzipSync(fs.readFileSync(path.join(directory, shard.file)))));
+  // Keep the complete relative path: every schema-3 rating/version can have a
+  // 0.json.gz, so matching only the basename can silently inspect the wrong file.
+  const fetched = new Set(requests.filter((url) => url.includes('/training/')).map(trainingPath));
+  const files = manifest.schema === 3
+    ? [...fetched].filter((file) => file.startsWith(`${kind === 'puzzle' ? 'puzzles' : 'ordinary'}/${group.version}/`) && file.endsWith('.json.gz'))
+    : group.shards.filter((shard) => fetched.has(shard.file)).map((shard) => shard.file);
+  for (const file of files) {
+    const records = JSON.parse(new TextDecoder().decode(gunzipSync(fs.readFileSync(path.join(directory, file)))));
     const record = records.find((record) => initialFen(record) === fen);
     if (record) return record;
   }
 }
 
-test.beforeEach(async ({ page }) => {
+test.beforeEach(async ({ page, baseURL }) => {
   errors = []; forbidden = []; requests = [];
+  const site = new URL(baseURL);
   page.on('pageerror', (error) => errors.push(error.message));
   page.on('dialog', (dialog) => dialog.accept());
   page.on('request', (request) => {
     if (!request.url().startsWith('http')) return;
     const url = new URL(request.url());
     requests.push(url.pathname);
-    if (url.origin !== 'http://127.0.0.1:8765'
-        || !url.pathname.startsWith('/chess-puzzle-not-puzzle/')
+    if (url.origin !== site.origin
+        || !url.pathname.startsWith(site.pathname)
         || /\/api\/|\.wasm|\.nnue/.test(url.pathname)) forbidden.push(request.url());
   });
 });
-test.afterEach(() => { expect(errors).toEqual([]); expect(forbidden).toEqual([]); });
+test.afterEach(() => {
+  expect(errors).toEqual([]);
+  expect(forbidden).toEqual([]);
+  expect(requests.filter((url) => url.endsWith('/inventory.json'))).toEqual([]);
+});
 
-async function start(page, fraction = null) {
-  await page.goto('./');
+async function startReady(page, fraction = null) {
   await expect(page.locator('#start')).toBeEnabled();
   if (fraction !== null) {
     await page.locator('[name=ratio_mode][value=fixed]').check();
@@ -54,6 +64,11 @@ async function start(page, fraction = null) {
   await expect(page.locator('#training')).toBeVisible();
   await expect(page.locator('#next')).toBeEnabled();
   return page.locator('#board').getAttribute('data-fen');
+}
+
+async function start(page, fraction = null) {
+  await page.goto('./');
+  return startReady(page, fraction);
 }
 
 async function play(page, uci) {
@@ -78,10 +93,10 @@ async function clickMove(page, uci) {
 }
 
 async function fixtureRoutes(page, assets, block = () => false) {
-  await page.route('**/training/*', async (route) => {
-    const name = new URL(route.request().url()).pathname.split('/').at(-1);
-    if (block(name)) { await route.abort(); return; }
-    const bytes = assets.files.get(name);
+  await page.route('**/training/**', async (route) => {
+    const name = trainingPath(new URL(route.request().url()).pathname);
+    if (await block(name)) { await route.abort(); return; }
+    const bytes = (typeof assets === 'function' ? assets() : assets).files.get(name);
     await route.fulfill(bytes ? { status: 200, body: Buffer.from(bytes),
       contentType: name.endsWith('.gz') ? 'application/gzip' : 'application/json' } : { status: 404 });
   });
@@ -90,18 +105,17 @@ async function fixtureRoutes(page, assets, block = () => false) {
 test('startup is lazy, subpath-safe, and stores no session data', async ({ page }) => {
   await page.goto('./');
   await expect(page.locator('#start')).toBeEnabled();
-  expect(requests.filter((url) => url.endsWith('.json.gz'))).toHaveLength(0);
-  expect(requests.filter((url) => url.endsWith('/manifest.json'))).toHaveLength(1);
+  expect(requests.filter((url) => url.includes('/training/')).map(trainingPath)).toEqual(['manifest.json']);
   expect(await page.evaluate(() => ({ local: localStorage.length, session: sessionStorage.length, cookies: document.cookie })))
     .toEqual({ local: 0, session: 0, cookies: '' });
   const source = await page.request.head('./source.zip');
   expect(source.ok()).toBeTruthy();
   const files = [];
   // Read only ZIP headers; don't inflate a second copy of millions of puzzles.
-  unzipSync(fs.readFileSync('dist/source.zip'), { filter: (file) => { files.push(file.name); return false; } });
+  unzipSync(fs.readFileSync(path.join(dist, 'source.zip')), { filter: (file) => { files.push(file.name); return false; } });
   expect(files).toContain('chess-puzzle-not-puzzle/web/session.js');
   expect(files).toContain('chess-puzzle-not-puzzle/export_static.py');
-  expect(files.some((file) => /static-checkpoints|games\.pgn|\/cache\//.test(file))).toBe(false);
+  expect(files.some((file) => /static-checkpoints|games\.pgn|\/cache\/|\/public\/training\/|\/data\/training\//.test(file))).toBe(false);
   const licenses = await page.request.get('./licenses.txt');
   expect(licenses.ok()).toBeTruthy();
   expect(await licenses.text()).toContain('Jeff Hlywa');
@@ -259,6 +273,16 @@ test('drag artwork and destination circle are touch-only, including flipped boar
   }
 });
 
+test('bottom-rank board input is not intercepted by a local-preview notice', async ({ page }) => {
+  const source = ordinary('5bk1/5p2/4p1p1/4P1Pp/1p6/1P1r1N1P/2R2PK1/8 w - - 1 38',
+    'f3d2', ['g8h8', 'g8h7']);
+  await fixtureRoutes(page, makeSchema3Assets([puzzle], [source]));
+  await start(page, 0);
+  await expect(page.locator('#board')).toHaveAttribute('data-orientation', 'black');
+  await clickMove(page, 'g8h8');
+  await expect(page.locator('#feedback')).toContainText('Well played.');
+});
+
 test('promotion dialog supports underpromotion without an engine', async ({ page }) => {
   const source = ordinary('7k/P7/8/8/8/8/8/6K1 b - - 0 1', 'h8h7', ['a7a8n', 'a7a8q']);
   await fixtureRoutes(page, makeAssets([puzzle], [source]));
@@ -295,4 +319,155 @@ test('failed shard fetch does not skip, resample, or lose the current position',
   await expect(page.locator('#finish')).toBeEnabled();
   await page.locator('#finish').click();
   await expect(page.locator('#summary-rows tr').nth(1)).toContainText('0 / 1');
+});
+
+async function deterministicSessionProbe(page) {
+  await page.addInitScript(() => {
+    window.__randomCalls = 0;
+    Object.defineProperty(crypto, 'getRandomValues', { value(array) {
+      window.__randomCalls++;
+      array.fill(0);
+      return array;
+    } });
+    // Observe the existing controller's public snapshots without exposing a
+    // production debug API or relying on minified bundle names. The real RNG is
+    // Web Crypto, not Math.random; zero draws select row 0, then row 64 of 65.
+    const clone = window.structuredClone.bind(window);
+    window.__sessionViews = [];
+    window.structuredClone = (value, ...options) => {
+      if (Number.isInteger(value?.revision) && value.item) window.__sessionViews.push(clone(value));
+      return clone(value, ...options);
+    };
+  });
+}
+
+const sessionProbe = (page) => page.evaluate(() => {
+  // Animation is a one-action instruction, not persistent session state; a
+  // recovery view intentionally has no frames even when the item is unchanged.
+  const { animation: _animation, ...view } = window.__sessionViews.at(-1);
+  return { view, randomCalls: window.__randomCalls };
+});
+
+function deploymentAssets() {
+  const first = ordinary(START, 'e2e4', ['e7e5', 'c7c5']);
+  const second = ordinary(START, 'd2d4', ['d7d5', 'g8f6']);
+  const positions = Array.from({ length: 65 }, (_, i) => ({
+    ...(i === 64 ? second : first), id: `ordinary-${String(i).padStart(3, '0')}`,
+  }));
+  const replacement = ordinary(START, 'c2c4', ['e7e5', 'c7c5']);
+  const updated = positions.map((record) => ({ ...replacement, id: record.id }));
+  const a = makeSchema3Assets([puzzle], positions);
+  const b = makeSchema3Assets([puzzle], updated);
+  return { a, b, first, second, replacement, updated,
+    pendingPath: `ordinary/${a.manifest.ordinary.version}/1.json.gz` };
+}
+
+test('schema-3 groups are independent and a retained A remains usable after deploying manifest B', async ({ page }) => {
+  const { a, b, first, second, replacement, updated, pendingPath } = deploymentAssets();
+  expect(a.manifest.puzzles).toEqual(b.manifest.puzzles);
+  expect(a.manifest.ordinary.version).not.toBe(b.manifest.ordinary.version);
+  const puzzlesOnly = makeSchema3Assets([{ ...puzzle, rating: 1701 }], updated);
+  expect(puzzlesOnly.manifest.ordinary).toEqual(b.manifest.ordinary);
+  expect(puzzlesOnly.manifest.puzzles.version).not.toBe(b.manifest.puzzles.version);
+
+  const retained = { files: new Map([...a.files, ...b.files]) };
+  let deployed = false, release;
+  const deployment = new Promise((resolve) => { release = resolve; });
+  await deterministicSessionProbe(page);
+  await fixtureRoutes(page, () => deployed ? retained : a, async (name) => {
+    if (name === pendingPath) await deployment;
+    return false;
+  });
+  expect(await start(page, 0)).toBe(initialFen(first));
+  await play(page, first.line[0]);
+  const before = await sessionProbe(page);
+  expect(before.view.revision).toBe(1);
+  deployed = true;
+  release();
+  await page.locator('#next').click();
+  await expect(page.locator('#position-number')).toHaveText('Position 2');
+  await expect(page.locator('#next')).toBeEnabled();
+  await expect(page.locator('#board')).toHaveAttribute('data-fen', initialFen(second));
+  await play(page, second.line[0]);
+  await expect(page.locator('#feedback')).toContainText('Well played.');
+  expect((await sessionProbe(page)).view.revision).toBe(3);
+  const pinned = requests.filter((url) => url.includes('/training/')).map(trainingPath);
+  expect(pinned.filter((name) => name === 'manifest.json')).toHaveLength(1);
+  expect(pinned.filter((name) => name.endsWith('.gz'))).toEqual([
+    `ordinary/${a.manifest.ordinary.version}/0.json.gz`, pendingPath,
+  ]);
+  await page.locator('#finish').click();
+  await expect(page.locator('#overall-rate')).toHaveText('100.0%');
+  await expect(page.locator('#summary-rows tr').nth(1)).toContainText('2 / 2');
+
+  const reloadRequests = requests.length;
+  await page.reload();
+  await expect(page.locator('#setup')).toBeVisible();
+  expect(await startReady(page, 0)).toBe(initialFen(replacement));
+  await play(page, replacement.line[0]);
+  await expect(page.locator('#feedback')).toContainText('Well played.');
+  expect(requests.slice(reloadRequests).filter((url) => url.endsWith('.gz'))
+    .every((url) => url.includes(`/ordinary/${b.manifest.ordinary.version}/`))).toBe(true);
+  await page.locator('#finish').click();
+  await page.locator('#again').click();
+  await startReady(page, 100);
+  expect(requests.some((url) => url.includes(`/puzzles/${a.manifest.puzzles.version}/1700/0.json.gz`))).toBe(true);
+});
+
+test('expired schema-3 A preserves score, board, revision and pending draw; Finish works and reload uses B', async ({ page }) => {
+  const { a, b, first, replacement, pendingPath } = deploymentAssets();
+  let deployed = false, release;
+  const deployment = new Promise((resolve) => { release = resolve; });
+  await deterministicSessionProbe(page);
+  await fixtureRoutes(page, () => deployed ? b : a, async (name) => {
+    if (name === pendingPath) await deployment;
+    return false;
+  });
+  await start(page, 0);
+  await play(page, first.line[0]);
+  await expect(page.locator('#feedback')).toContainText('Well played.');
+  const before = await sessionProbe(page);
+  const board = await page.locator('#board').getAttribute('data-fen');
+  const expiredPrefetch = page.waitForResponse((response) => trainingPath(new URL(response.url()).pathname) === pendingPath);
+  deployed = true;
+  release();
+  const prefetchResponse = await expiredPrefetch;
+  expect(prefetchResponse.status()).toBe(404);
+  // Catalog rejects a 404 from its headers without consuming the error body.
+  // Chromium need not report Response.finished() for that unread routed body;
+  // allow the rejection/eviction microtasks to settle before retrying instead.
+  await page.evaluate(() => new Promise((resolve) => requestAnimationFrame(resolve)));
+  for (let retry = 0; retry < 2; retry++) {
+    const failed = page.waitForResponse((response) => trainingPath(new URL(response.url()).pathname) === pendingPath);
+    await page.locator('#next').click();
+    expect((await failed).status()).toBe(404);
+    await expect(page.locator('#error')).toContainText('finish it; then reload');
+    await expect(page.locator('#next')).toBeEnabled();
+    await expect(page.locator('#finish')).toBeEnabled();
+    await expect(page.locator('#position-number')).toHaveText('Position 1');
+    await expect(page.locator('#board')).toHaveAttribute('data-fen', board);
+    expect(await sessionProbe(page)).toEqual(before);
+  }
+  const oldShards = requests.filter((url) => url.endsWith('.gz')).map(trainingPath);
+  expect(oldShards).toEqual([`ordinary/${a.manifest.ordinary.version}/0.json.gz`,
+    pendingPath, pendingPath, pendingPath]);
+  expect(requests.filter((url) => url.endsWith('/manifest.json'))).toHaveLength(1);
+  await page.locator('#finish').click();
+  await expect(page.locator('#summary')).toBeVisible();
+  await expect(page.locator('#overall-rate')).toHaveText('100.0%');
+  await expect(page.locator('#summary-rows tr').nth(1).locator('td').nth(1)).toHaveText('1');
+  await expect(page.locator('#summary-rows tr').nth(1)).toContainText('1 / 1');
+  await expect(page.locator('#summary-note')).toContainText('0 untouched');
+
+  const reloadRequests = requests.length;
+  await page.reload();
+  await expect(page.locator('#setup')).toBeVisible();
+  await expect(page.locator('#error')).toBeHidden();
+  expect(await startReady(page, 0)).toBe(initialFen(replacement));
+  await play(page, replacement.line[0]);
+  await expect(page.locator('#feedback')).toContainText('Well played.');
+  const fresh = requests.slice(reloadRequests).filter((url) => url.includes('/training/')).map(trainingPath);
+  expect(fresh[0]).toBe('manifest.json');
+  expect(fresh.filter((name) => name.endsWith('.gz')).every((name) => name.startsWith(`ordinary/${b.manifest.ordinary.version}/`))).toBe(true);
+  expect((await sessionProbe(page)).view.revision).toBe(1);
 });

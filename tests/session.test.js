@@ -1,6 +1,8 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { Chess } from '../web/chess.js';
+import { Catalog } from '../web/catalog.js';
+import { makeSchema3Assets } from './data-fixtures.js';
 import { createController, Deck, Item, Session, randomFraction, validateSettings } from '../web/session.js';
 import { FakeCatalog, ordinary, puzzle, settings } from './fixtures.js';
 
@@ -168,6 +170,88 @@ test('failed next fetch retains current item, score, revision, and reserved draw
   assert.equal(session.counts.puzzle.attempted, 1);
 });
 
+test('schema 3 failed prefetch and next retain the current attempt and the identical reserved reference', async () => {
+  const sources = Array.from({ length: 129 }, (_, index) => ({ ...puzzle, id: `p-${String(index).padStart(3, '0')}` }));
+  const { manifest, files } = makeSchema3Assets(sources);
+  const base = new URL('https://example.test/subpath/training/');
+  const calls = [];
+  let available = false, draws = 0;
+  const catalog = new Catalog(manifest, base, async (url) => {
+    const relative = new URL(url).pathname.slice(base.pathname.length);
+    calls.push(relative);
+    if (relative.endsWith('/1.json.gz') && !available) return new Response('offline', { status: 503 });
+    return new Response(files.get(relative));
+  });
+  const session = new Session(catalog, settings(), () => { draws++; return 0; });
+  await session.advance();
+  session.current.move('e7e5');
+  await new Promise((resolve) => setImmediate(resolve)); // Let the failed prefetch evict its promise.
+  assert.equal(calls.length, 2);
+  const pending = session.pending;
+  assert.deepEqual(pending.ref, { kind: 'puzzle', version: manifest.puzzles.version, rating: 1700, part: 1, row: 0 });
+  const before = structuredClone(session.view());
+  const counts = structuredClone(session.counts);
+  const beforeDraws = draws;
+  await assert.rejects(session.advance(), /not been skipped/);
+  assert.deepEqual(session.view(), before);
+  assert.deepEqual(session.counts, counts);
+  assert.equal(session.pending, pending);
+  assert.equal(session.pending.ref, pending.ref);
+  assert.equal(draws, beforeDraws);
+  available = true;
+  await session.advance();
+  assert.equal(session.current.source.id, 'p-128');
+  assert.equal(session.view().number, 2);
+  assert.equal(session.counts.puzzle.attempted, 1);
+  assert.equal(session.counts.puzzle.successes, 0);
+  assert.equal(calls.filter((relative) => relative.endsWith('/1.json.gz')).length, 3);
+});
+
+test('schema 3 next joins an in-flight prefetch rather than fetching or drawing again', async () => {
+  const { manifest, files } = makeSchema3Assets(Array.from({ length: 129 }, (_, i) => ({ ...puzzle, id: `p-${String(i).padStart(3, '0')}` })));
+  const base = new URL('https://example.test/subpath/training/');
+  const calls = [];
+  let release, draws = 0;
+  const gate = new Promise((resolve) => { release = resolve; });
+  const catalog = new Catalog(manifest, base, async (url) => {
+    const relative = new URL(url).pathname.slice(base.pathname.length);
+    calls.push(relative);
+    if (relative.endsWith('/1.json.gz')) await gate;
+    return new Response(files.get(relative));
+  });
+  const session = new Session(catalog, settings(), () => { draws++; return 0; });
+  await session.advance();
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(calls.length, 2);
+  const before = session.view();
+  const reserved = session.pending;
+  const beforeDraws = draws;
+  const advancing = session.advance();
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.deepEqual(session.view(), before);
+  assert.equal(session.pending, reserved);
+  assert.equal(draws, beforeDraws);
+  assert.equal(calls.length, 2);
+  release();
+  await advancing;
+  assert.equal(session.current.source.id, 'p-128');
+  assert.equal(session.view().number, 2);
+  assert.equal(calls.length, 2);
+});
+
+test('schema 3 catalog references stay private until a position is scored or revealed', async () => {
+  const { manifest, files } = makeSchema3Assets();
+  const base = new URL('https://example.test/training/');
+  const catalog = new Catalog(manifest, base, (url) => Promise.resolve(new Response(files.get(new URL(url).pathname.slice(base.pathname.length)))));
+  const api = controller(catalog);
+  let state = await start(api);
+  for (const key of ['kind', 'rating', 'version', 'part', 'row', 'review']) assert.equal(state.item[key], undefined);
+  state = await action(api, 'reveal', state);
+  assert.equal(state.item.kind, 'puzzle');
+  assert.equal(state.item.rating, 1700);
+  for (const key of ['version', 'part', 'row']) assert.equal(state.item[key], undefined);
+});
+
 test('missing grade fails before marking an attempt', () => {
   const source = ordinary();
   delete source.scores.f7f6;
@@ -195,6 +279,37 @@ test('decks exhaust before repeats and avoid a boundary repeat', () => {
   const first = [deck.draw(), deck.draw(), deck.draw()];
   assert.equal(new Set(first).size, 3);
   assert.notEqual(deck.draw(), first.at(-1));
+});
+
+test('virtual references exhaust every index, including unequal parts and rating gaps', () => {
+  const references = [
+    ...Array.from({ length: 131 }, (_, index) => ({ kind: 'puzzle', version: 'a'.repeat(20), rating: 1700,
+      part: Math.floor(index / 128), row: index % 128 })),
+    ...Array.from({ length: 2 }, (_, row) => ({ kind: 'puzzle', version: 'a'.repeat(20), rating: 1901, part: 0, row })),
+  ];
+  // A fresh object from at() must still identify the same deck index each cycle.
+  const pool = { length: references.length, at: (index) => ({ ...references[index] }) };
+  const identity = (ref) => JSON.stringify(ref);
+  for (const random of [() => 0, () => 0.4, () => 1 - Number.EPSILON]) {
+    const deck = new Deck(pool, random);
+    let last = null;
+    for (let cycle = 0; cycle < 3; cycle++) {
+      const drawn = Array.from({ length: pool.length }, () => identity(deck.draw()));
+      assert.equal(new Set(drawn).size, pool.length);
+      assert.deepEqual(new Set(drawn), new Set(references.map(identity)));
+      assert.notEqual(drawn[0], last);
+      last = drawn.at(-1);
+      assert.equal(deck.remaining, 0);
+      assert.equal(deck.swaps.size, 0);
+    }
+  }
+});
+
+test('empty and singleton virtual decks retain their endpoint behavior', () => {
+  assert.throws(() => new Deck({ length: 0, at() { assert.fail('empty pool was indexed'); } }).draw(), /No positions/);
+  const singleton = new Deck({ length: 1, at: () => ({ kind: 'ordinary', version: 'a'.repeat(20), part: 0, row: 0 }) },
+    () => { assert.fail('a singleton does not need randomness'); });
+  for (let i = 0; i < 3; i++) assert.equal(singleton.draw().row, 0);
 });
 
 test('exact rating interval and zero-puzzle endpoint', async () => {
