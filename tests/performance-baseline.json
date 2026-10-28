@@ -1,0 +1,10 @@
+{
+  "format": 1,
+  "description": "Bundle-size baseline from the preserved pre-schema-3 HEAD build; not a portable timing baseline. Controlled historical reports remain under ignored data/training/measurements.",
+  "sourceRevision": "b61868d",
+  "datasetId": "c3d59f32f6d48d26fedc",
+  "bundles": {
+    "javascript": { "rawBytes": 98263, "gzipBytes": 35154 },
+    "css": { "rawBytes": 28205, "gzipBytes": 7672 }
+  }
+}
