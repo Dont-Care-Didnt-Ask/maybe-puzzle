@@ -155,3 +155,33 @@ Each section records a choice, alternatives, and the reason for the MVP default.
 **Alternatives:** Submit four consecutive plies from each game, or permanently discard the other three after trying the first.
 
 **Reason:** Parallel workers should not spend full all-move searches on several positions from a game that can contribute only one. Deferring—not dropping—the remaining candidates improves useful throughput while preserving the ability to fill a difficult corpus.
+
+## 20. Complete puzzle archive with a compact exact-rating catalog
+
+**Decision:** Replace the 10,000-puzzle sample with all 6,157,341 records in the official cached snapshot, including 832,903 at 2400 ± 300. Apply no popularity/play-count/rating filter. Legally replay every complete line in the importer, retain normalized post-setup keys for overlap validation, and record the source SHA-256 and import counts. Use a disk-backed SQLite sort/index rather than a multi-million-object Python list. Schema 2 stores one exact rating per homogeneous puzzle shard (up to 2,048 records), keeping the full manifest around 307 KB; schema 1 remains readable.
+
+**Alternatives:** Merely increase the reservoir sample, restrict the import to high ratings, put millions of ratings into the startup manifest, or load the full corpus into browser memory.
+
+**Reason:** The request is for everything Lichess publishes, especially around 2400, without changing the existing default difficulty. Virtual shard ranges plus a sparse lazy Fisher–Yates deck retain exact uniform, without-replacement selection with startup memory proportional to shards, not puzzle count. Runtime loading/cache/prefetch behavior remains bounded. Routine builds check all hashes/record structures/IDs/ratings/overlaps and fully replay ordinary positions. Puzzles are fully replayed at import and again when selected; an explicit `--deep` build validator can additionally replay the entire archive in JavaScript. The source ZIP is streamed and stores existing gzip shards without recompression.
+
+## 21. Thirty-thousand-position offline expansion without lowering search quality
+
+**Decision:** Sample 60,000 real rated games, add games required to retain existing positions, and target 30,000 distinct-game positions with the existing 100,000-node-per-root full move grading. Exclude positions against the complete puzzle index. Reuse published complete grades only when engine name, node budget, threshold, and exporter version match exactly. Checkpoint every completed candidate/rejection, and publish only a complete target. Keep CPU-heavy work local and resumable; seven single-threaded engines can run concurrently on the current eight-core machine.
+
+**Alternatives:** Lower the node budget to finish quickly, use only two MultiPV moves as if they covered all legal choices, duplicate positions/games, publish a partial count labeled as 30,000, or run Stockfish in deployment CI.
+
+**Reason:** Corpus size should not silently weaken move grading or change first-attempt semantics. This is an hours/overnight/multi-day authoring operation. The current public manifest reports completed/published records, while logs/checkpoints report in-progress work; the prior corpus remains usable until the complete replacement is ready.
+
+## 22. Locally bundled, license-audited themes and minimal text removal
+
+**Decision:** Preserve the existing Brown/Cburnett defaults. Add Blue/Green/Grey checkerboard palettes and the freely redistributable Merida (GPL-2.0-or-later) and Chessnut (Apache-2.0) SVG sets from a pinned public Lichess revision. Bundle assets, upstream attribution, and full license texts locally. Exclude noncommercial/restricted sets. A compact collapsed “Board & pieces” control works before and during training; choices live only in the current tab. Remove only “Calculate without the guarantee.” and “The position doesn't tell you.” from the page copy.
+
+**Alternatives:** Hotlink Lichess assets, copy every theme without checking licenses, change the default appearance/difficulty, persist new preferences in storage, or redesign unrelated parts of the page.
+
+**Reason:** Themes should work on a static repository subpath without third-party requests or additional persistence. The remainder of the layout, copy, training behavior, scoring, and defaults stays unchanged.
+
+## 23. Commit completed checkpoint snapshots while expansion continues
+
+**Decision:** Add an explicit checkpoint-only snapshot tool, separate from the normal full-target exporter. Reuse only completed grades whose candidate/configuration fingerprints match; recheck legal move coverage, ordinary-position invariants, unique games/positions, and complete-puzzle overlap. Preserve already published positions and label the snapshot with its actual qualified count and whether the 30,000 target is complete. Never run Stockfish or commit raw checkpoint files during snapshot creation.
+
+**Reason:** Waiting for the full expansion previously prevented shipping thousands of usable results. A shared, reentrant publication lock serializes only manifest/shard updates, not CPU evaluation. Freeze the published manifest and referenced shards with hardlinks (or copies across filesystems), then stage that immutable tree with an alternate Git worktree. A later exporter publication cannot remove files from the snapshot or produce a mixed dataset in the commit. Include mobile touch-drag changes in their own semantic commit, preserve backlog edits, and continue excluding the commit script itself.

@@ -4,7 +4,9 @@ Chess training without knowing whether there is a tactic. Solve a Lichess puzzle
 
 **A fully static website:** vanilla JavaScript, Chessground, chess.js, and precomputed Stockfish move grades. No backend, browser engine, accounts, analytics, or saved session history. Runs on **free GitHub Pages**. Python/Stockfish are needed only if you want to prepare new training data.
 
-Included corpus: **10,000 puzzles and 1,000 ordinary positions**, with **33,094 legal ordinary-position moves** fully graded using Stockfish 19 at 100,000 nodes per root move. All gzip shards together occupy **0.82 MB**, loaded on demand rather than upfront. The application JavaScript is about **34 KB gzip**.
+Included puzzles: the **complete official Lichess snapshot — 6,157,341 puzzles**, including **832,903 rated 2100–2700** (2400 ± 300). No rating, popularity, or play-count cutoff is applied; every imported solution was legally replayed. The full puzzle/ordinary assets occupy about **360 MB compressed**, but are loaded on demand, never all at startup.
+
+Ordinary positions use **Stockfish 19, 100,000 nodes per legal root move**, with full move coverage. The expansion target is **30,000 positions from distinct real games**; `public/training/manifest.json` and the setup page show the count actually published. Completed checkpoint results can also be published as an explicitly partial snapshot while the expansion continues; unfinished evaluations never count as available positions.
 
 ## Try locally
 
@@ -91,6 +93,8 @@ For UI/code changes, edit, test, commit, and push; **no data re-preparation is n
 - Configure puzzle difficulty as **anchor ± margin**, e.g. **1700 ± 300**. Rating selection is exact and uniform across matching prepared puzzle records, not approximately bucketed.
 - Both kinds show the preceding opponent move, then let you move. Source/rating/type information is hidden in the UI until the attempt is scored.
 - Click/drag, or enter UCI notation: `e2e4`, `e1g1` (castling), `a7a8n` (underpromotion). Promotion choice, board flipping (**F** when not typing), and post-attempt line replay are supported.
+- Touch dragging doubles the held piece artwork and shows a shadow-like circle around the square under your finger. Tap-to-move and mouse interaction are unchanged; this works entirely on the static site.
+- Open **Board & pieces** to choose Brown, Blue, Green, or Grey boards and Cburnett, Merida, or Chessnut pieces. Changes apply immediately, including during an attempt, without resetting the board or score. Defaults are unchanged. Themes are tab-local (reset on reload); all piece images are bundled locally, with no Lichess hotlinks.
 - **Puzzles:** play all your moves in the exact published Lichess line; the opponent replies automatically. Equivalent alternatives can be rejected.
 - **Ordinary positions:** one legal move is enough. Its precomputed evaluation must be within **50 centipawns / 0.5 pawns** of the best move. Every legal move was searched offline; at least two qualify.
 - A wrong legal move, skip, or revealed solution is unsuccessful. Retries are allowed but cannot restore first-attempt credit. Illegal input does not consume an attempt.
@@ -100,51 +104,56 @@ For UI/code changes, edit, test, commit, and push; **no data re-preparation is n
 
 ## How static data loading works
 
-`public/training/manifest.json` contains corpus counts, provenance/search settings, shard filenames, and a compact exact puzzle-rating index. It contains no active session state. The application initially fetches only this manifest, then the shard needed for the selected position. Shards contain 64 records by default and are gzip-decoded with fflate; no special server headers are needed.
+`public/training/manifest.json` contains corpus counts, provenance/search settings, shard filenames, and a compact exact puzzle-rating index. It contains no active session state. The full catalog's schema-2 manifest is about **307 KB**, with one exact rating per puzzle shard (up to 2,048 puzzles each); ordinary shards contain up to 64 positions. Schema-1 sampled catalogs remain supported. The application initially fetches only the manifest, then the selected shard, gzip-decoded with fflate; no special server headers are needed.
+
+Rating selection uses virtual shard ranges, and the deck uses a sparse Fisher–Yates shuffle. Selection remains exactly uniform over matching records, without allocating or shuffling millions of per-puzzle references at startup.
 
 The next item is prefetched while the current one is shown. Only a bounded set of eight shards is retained in application memory. Prefetched but undisplayed items never enter the statistics. If loading the next shard fails, the current board/score and reserved draw remain unchanged; retrying does not silently skip or resample. Network reads (including response bodies) time out after ten seconds so a broken connection cannot lock controls indefinitely. Finishing the current session still works without another fetch.
 
-All move grading is local table lookup. There is no runtime engine download or analysis delay. Data filenames are content-addressed, and the build verifies hashes, full move coverage, legal replay, exact ratings, uniqueness, and puzzle/ordinary overlap. Active tabs can keep their previous manifest after a dataset update; if an old shard is no longer available, finish the session and reload before starting a new one.
+All move grading is local table lookup. There is no runtime engine download or analysis delay. Data filenames are content-addressed. The importer legally replays **every puzzle** and records its normalized post-setup position key; the build checks every shard's hash, every record's structure, exact ratings, unique IDs, and puzzle/ordinary overlap. Every ordinary position also receives full legal replay and move-coverage checks on every build. Selected puzzles are legally validated again in the browser. `npm run validate:data -- --deep` additionally replays all 6.1 million puzzle lines in JavaScript (slow, optional; not repeated in routine builds). Active tabs can keep their previous manifest after a dataset update; if an old shard is no longer available, finish the session and reload before starting a new one.
 
 ## Optional: prepare or expand the corpus locally
 
 Requirements: **Python 3.11+**, [uv](https://docs.astral.sh/uv/), and **Stockfish**.
 
-### 1. Download/sample games and puzzles
+### 1. Import all published puzzles
 
 ```sh
 brew install stockfish                 # macOS; Debian/Ubuntu: sudo apt install stockfish
 uv sync
-uv run python prepare.py
+uv run python import_puzzles.py
+# Or: uv run python import_puzzles.py --source /path/to/lichess_db_puzzle.csv.zst
 ```
 
-Default inputs are the [official Lichess puzzle CSV](https://database.lichess.org/#puzzles) and the August 2025 [Lichess Elite game archive](https://database.nikonoel.fr/). This downloads about 372 MiB compressed, caches sources, samples **2,000 rated standard games** with **both ratings ≥1800**, and samples **10,000 puzzles** (popularity ≥0, at least 100 plays). Sampling scans the complete source files rather than taking the first N records.
+The [official Lichess puzzle CSV](https://database.lichess.org/#puzzles) is imported in full, including high-rated and rarely played puzzles. Every FEN and complete solution must pass legal replay; any invalid rows are counted and disclosed in `puzzle_import` metadata (the included snapshot has **zero**). The compressed source's SHA-256 is recorded. SQLite provides a disk-backed rating sort and overlap index (`data/puzzle-index.sqlite3`, about 2 GB), so millions of puzzle objects are not held in RAM. Re-running with the same source reuses the completed index.
 
-The Elite source actually prefilters to 2500+ versus 2300+, excluding bullet: it meets the threshold but is **not representative of all 1800+ play**. To use a broader full Lichess archive or different sample sizes:
+The official URL is a moving snapshot. Downloads are cached; to refresh, move the old `data/cache/lichess_db_puzzle.csv.zst` aside or supply a new local `--source`. No game positions are re-evaluated for a puzzle-only update. Ordinary positions that overlap newly imported puzzles are excluded. Do not run this importer concurrently with an exporter using the same output/index.
+
+### 2. Expand to 30,000 fully graded ordinary positions
 
 ```sh
-uv run python prepare.py \
-  --games-source /path/to/lichess-games.pgn.zst \
-  --puzzles-source /path/to/lichess_db_puzzle.csv.zst \
-  --games 4000 --positions 2000 --puzzles 20000 \
-  --min-rating 1800 --min-ply 20 --max-ply 160 --nodes 100000 --seed 2026
+uv run python expand_corpus.py --positions 30000 --games 60000 --workers 7 --build
+# macOS, optionally keep the machine awake while running:
+# caffeinate -i uv run python expand_corpus.py --workers 7 --build
 ```
 
-URLs or local PGN/PGN.zst/PGN.bz2/PGN.gz/ZIP and CSV/CSV.zst inputs are accepted. `data/games.pgn` retains the actual sampled source games. The puzzle URL is a moving snapshot: delete its cached download to refresh it. Reproducibility requires the same cached sources, seed, and engine build.
+This samples **60,000 rated standard games**, plus any extra games needed to retain existing positions, from the August 2025 [Lichess Elite archive](https://database.nikonoel.fr/). Both players must be at least 1800. The Elite source actually prefilters to 2500+ versus 2300+, excluding bullet: it meets that threshold but is **not representative of all 1800+ play**. `--games-source` also accepts a broader local/URL PGN, compressed PGN, or ZIP. Sampling scans the whole archive, and `data/expanded/games.pgn` retains the selected real games.
 
-### 2. Fully grade and export static assets
+Full grading uses **100,000 nodes independently for every legal root move**, not just a two-line MultiPV filter. It rejects mating/extreme/unique-good-move positions, excludes every position in the complete puzzle index, and keeps at most one ordinary position per game. It only publishes after all **30,000** qualify; the old dataset remains usable until then. The original 1,000-position export took roughly 1½ hours with three workers on the local fanless M3; **30,000 is a long-running, potentially overnight/multi-day job**, not part of a build or deployment. More workers increase sustained CPU use, not the search budget.
 
-The preceding preparation keeps only a two-line filter. It is **not** sufficient for static grading; run:
+All evaluations and rejections are checkpointed in `data/expanded/static-checkpoints/`. **Ctrl+C is safe; rerun the same command to resume.** Prepared game inputs are also reused. Changing worker count does not invalidate evaluations; changing engine version, node budget, candidate input, or exporter version does. `--workers 1` reduces load. Stop the exporter before changing its inputs, refreshing puzzles, or clearing checkpoints. Stockfish can be selected with `STOCKFISH=/path/to/stockfish`; it is never shipped to browsers.
+
+For a detached run, redirect output to a log and monitor it with `tail -f data/expand-corpus.log`. A locally started expansion may still be running after the code/UI work finishes; the log and published manifest, not the target setting, determine completion. With `--build`, successful publication automatically validates and rebuilds `dist/`; without it, run the validation/build commands below afterward. Sending SIGINT/SIGTERM to the expansion launcher forwards a checkpoint-safe interrupt to its exporter.
+
+To publish all **completed** results before the full target is ready, without launching Stockfish:
 
 ```sh
-uv run python export_static.py --workers 3 --positions 1000
+uv run python snapshot_corpus.py --publish
 ```
 
-This is the expensive step—plan for sustained CPU use. The first 1,000-position export, including replacements, took roughly **1½ hours with three workers on the local fanless M3**, including checkpoint-interruption tests and concurrent builds/tests; this is observed wall time, not a controlled throughput benchmark. The committed corpus is already prepared, so normal users/deployments do not repeat it. It searches every legal root move independently at the preparation node budget (100,000 by default), re-sorts the complete table, rejects mating/extreme/unique-good-move positions, and retains at most one ordinary position per game. If previously filtered positions no longer qualify, it samples replacements from unused games in the original corpus. If the corpus cannot supply enough, it fails without replacing the public dataset; prepare more source games or choose a smaller target.
+This verifies checkpoint configuration fingerprints and complete move coverage, excludes puzzle overlaps and duplicate games, and records the actual qualified count separately from the 30,000 target. Workers may continue evaluating: a shared lock serializes only publication, and immutable snapshot copies remain usable after later publications remove old live shards. `--snapshot-root /path/to/empty-directory` additionally retains a frozen `public/training/` tree for staging with an alternate Git worktree. The commit script uses this frozen tree, not the changing live directory; raw checkpoints and the commit script itself are not committed. Run a build after standalone snapshot publication to update `dist/`.
 
-Each completed candidate, including rejections, is saved in `data/static-checkpoints/`. **Ctrl+C is safe; rerun the same command to resume.** Changing `--workers` does not invalidate evaluations. Changing the reported engine version, node budget, candidate input, or exporter version does. If using a custom engine build that keeps the same reported name, stop the exporter and remove its checkpoints before re-evaluating with that build. Use `--workers 1` to reduce load. A higher `--nodes` budget improves search reliability at a corresponding CPU cost.
-
-Stockfish can be selected via `STOCKFISH=/path/to/stockfish`. It is not included in the website. `--data-dir`, `--output`, and `--shard-size` support alternative preparation/output directories; see `--help`.
+The original smaller sampling workflow remains available with `prepare.py` and `export_static.py --positions 1000`. It intentionally uses a quality-filtered sample, **not** the full-archive import. See each script's `--help` for alternative directories and budgets.
 
 ### 3. Validate and publish the new assets
 
@@ -165,7 +174,8 @@ Do not edit source data or run two exporters against the same directories concur
 
 ```sh
 npm test                              # rules, sessions, loading, complete dataset checks
-npm run build                         # full asset validation + production build + source ZIP
+npm run build                         # all hashes/records + ordinary legal grades + build/source ZIP
+npm run validate:data -- --deep        # optional: also replay every puzzle line in JavaScript
 npx playwright install chromium       # one-time browser-test dependency
 npm run test:e2e                       # plain static server, desktop + mobile, repository subpath
 
@@ -189,6 +199,9 @@ scripts/                 dataset validation, source ZIP, static test server
 .github/workflows/       GitHub Pages build/deploy workflow
 prepare.py, engine.py    optional local sampling and Stockfish adapter
 export_static.py         resumable full-grading exporter
+import_puzzles.py        complete-archive legal import + disk-backed rating/overlap index
+expand_corpus.py         60,000-game sample + 30,000-position full-grading pipeline
+snapshot_corpus.py       publish/freeze completed checkpoints without engine work
 benchmark.py             author-side throughput/size benchmark
 data/                    ignored raw assets and grading checkpoints (not sessions)
 tests/                   Node, Playwright, and Python tests
@@ -198,4 +211,4 @@ tests/                   Node, Playwright, and Python tests
 
 “Ordinary” is an operational engine filter, not proof that no tactics exist. Two similarly good tactical moves can pass. The default node budget is an MVP compromise, especially near the 0.5-pawn boundary; it is not an authoritative chess assessment. There are no hints, adaptive ratings, clocks, free analysis mode, accounts, or persistent results.
 
-The project is **GPL-3.0-or-later**; see [LICENSE](LICENSE) and [THIRD_PARTY.md](THIRD_PARTY.md). Keep source available when distributing the Chessground frontend. The build's `source.zip` contains application/preparation/test sources, lockfiles, published training assets, and dependency source/license files—never raw game archives, engine checkpoints, or session state. Lichess game/puzzle data is CC0. This independent project is not affiliated with Lichess.
+The project is **GPL-3.0-or-later**; see [LICENSE](LICENSE) and [THIRD_PARTY.md](THIRD_PARTY.md). Keep source available when distributing the Chessground frontend. The build's `source.zip` contains application/preparation/test sources, lockfiles, published training/theme assets, and dependency source/license files—never raw game archives, engine checkpoints, or session state. It is streamed during the build (already-gzipped training shards are stored without recompression), avoiding a second full corpus in build memory. Lichess game/puzzle data is CC0. This independent project is not affiliated with Lichess.
