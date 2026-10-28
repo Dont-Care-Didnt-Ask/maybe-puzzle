@@ -2,6 +2,7 @@ import { Chessground } from '@lichess-org/chessground';
 import { Catalog } from './catalog.js';
 import { createController } from './session.js';
 import { initThemes } from './themes.js';
+import { initTouchDrag } from './touch-drag.js';
 import './style.css';
 
 const $ = (id) => document.getElementById(id);
@@ -68,6 +69,7 @@ function makeBoard() {
     drawable: { enabled: true },
     disableContextMenu: true,
   });
+  initTouchDrag($('board'), ground);
 }
 
 function renderSidebar() {

@@ -197,6 +197,68 @@ test('reveal and skip count as failures; mobile layout fits', async ({ page }) =
   await expect(page.locator('#overall-rate')).toHaveText('0.0%');
 });
 
+test('drag artwork and destination circle are touch-only, including flipped boards', async ({ page, context }) => {
+  await fixtureRoutes(page, makeAssets([puzzle], [ordinary()]));
+  const touch = await page.evaluate(() => navigator.maxTouchPoints > 0);
+  const client = touch ? await context.newCDPSession(page) : null;
+  for (const flipped of [false, true]) {
+    await start(page, 0);
+    if (flipped) await page.locator('#flip').click();
+    await page.locator('#board').scrollIntoViewIfNeeded();
+    const board = page.locator('#board');
+    const box = await board.boundingBox();
+    const white = await board.getAttribute('data-orientation') === 'white';
+    const center = (rank) => ({
+      x: box.x + ((white ? 4 : 3) + 0.5) * box.width / 8,
+      y: box.y + ((white ? 8 - rank : rank - 1) + 0.5) * box.height / 8,
+    });
+    const from = center(7), to = center(5);
+    if (touch) {
+      await client.send('Input.dispatchTouchEvent', { type: 'touchStart', touchPoints: [from] });
+      await client.send('Input.dispatchTouchEvent', { type: 'touchMove', touchPoints: [to] });
+    } else {
+      await page.mouse.move(from.x, from.y);
+      await page.mouse.down();
+      await page.mouse.move(to.x, to.y, { steps: 5 });
+    }
+    const piece = board.locator('piece.dragging');
+    await expect(piece).toHaveCount(1);
+    const target = board.locator('.touch-drag-target');
+    if (touch) {
+      await expect(board).toHaveClass(/touch-dragging/);
+      await expect(target).toBeVisible();
+      const circle = await target.boundingBox();
+      expect(circle.x + circle.width / 2).toBeCloseTo(to.x, 0);
+      expect(circle.y + circle.height / 2).toBeCloseTo(to.y, 0);
+      expect(circle.width / (box.width / 8)).toBeCloseTo(Math.SQRT2, 2);
+      const artwork = await piece.evaluate((el) => {
+        const style = getComputedStyle(el, '::after');
+        return { width: parseFloat(style.width), pieceWidth: el.getBoundingClientRect().width };
+      });
+      expect(artwork.width / artwork.pieceWidth).toBeCloseTo(2, 2);
+      await client.send('Input.dispatchTouchEvent', { type: 'touchMove', touchPoints: [{ x: box.x - 5, y: to.y }] });
+      await expect(target).toBeHidden();
+      if (flipped) {
+        await client.send('Input.dispatchTouchEvent', { type: 'touchCancel', touchPoints: [] });
+        await expect(board).not.toHaveClass(/touch-dragging/);
+        await expect(board.locator('piece.dragging')).toHaveCount(0);
+        await expect(page.locator('#feedback')).toContainText('Your turn');
+        await client.send('Input.dispatchTouchEvent', { type: 'touchStart', touchPoints: [from] });
+      }
+      await client.send('Input.dispatchTouchEvent', { type: 'touchMove', touchPoints: [to] });
+      await expect(target).toBeVisible();
+      await client.send('Input.dispatchTouchEvent', { type: 'touchEnd', touchPoints: [] });
+    } else {
+      await expect(board).not.toHaveClass(/touch-dragging/);
+      await expect(target).toBeHidden();
+      await page.mouse.up();
+    }
+    await expect(target).toBeHidden();
+    await expect(board).not.toHaveClass(/touch-dragging/);
+    await expect(page.locator('#feedback')).toContainText('Well played.');
+  }
+});
+
 test('promotion dialog supports underpromotion without an engine', async ({ page }) => {
   const source = ordinary('7k/P7/8/8/8/8/8/6K1 b - - 0 1', 'h8h7', ['a7a8n', 'a7a8q']);
   await fixtureRoutes(page, makeAssets([puzzle], [source]));
