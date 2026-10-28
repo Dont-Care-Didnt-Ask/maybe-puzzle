@@ -1,6 +1,6 @@
 # Design decisions
 
-**Static-site migration:** Decisions 13 onward supersede the server-specific parts of decisions 1, 2, 7, 8, and 9. Earlier sections are retained as history, not current deployment instructions.
+**Static-site migration:** Decisions 13 onward supersede the server-specific parts of decisions 1, 2, 7, 8, and 9. **Corpus distribution migration:** Decisions 24–27 supersede the source-Git, schema-2 packaging, and staging/publication portions of decisions 15, 20, and 23. Earlier decisions are retained as historical rationale, not current operational instructions; none of the new decisions changes grading.
 
 Each section records a choice, alternatives, and the reason for the MVP default.
 
@@ -185,3 +185,35 @@ Each section records a choice, alternatives, and the reason for the MVP default.
 **Decision:** Add an explicit checkpoint-only snapshot tool, separate from the normal full-target exporter. Reuse only completed grades whose candidate/configuration fingerprints match; recheck legal move coverage, ordinary-position invariants, unique games/positions, and complete-puzzle overlap. Preserve already published positions and label the snapshot with its actual qualified count and whether the 30,000 target is complete. Never run Stockfish or commit raw checkpoint files during snapshot creation.
 
 **Reason:** Waiting for the full expansion previously prevented shipping thousands of usable results. A shared, reentrant publication lock serializes only manifest/shard updates, not CPU evaluation. Freeze the published manifest and referenced shards with hardlinks (or copies across filesystems), then stage that immutable tree with an alternate Git worktree. A later exporter publication cannot remove files from the snapshot or produce a mixed dataset in the commit. Include mobile touch-drag changes in their own semantic commit, preserve backlog edits, and continue excluding the commit script itself.
+
+## 24. Separately versioned immutable prepared release groups
+
+**Decision:** Move generated training data out of application-source Git only after verified preservation and retrieval gates. Use schema 3: a compact startup catalog with independent full SHA-256 puzzle/ordinary versions, counts, shard sizes, and sorted exact-rating count pairs. Derive every shard path. Default puzzle size is 256 (supported 128–256), ordinary size 64. Keep schema-1/2 input readers and validators, but emit schema 3 from new exporters. Record-uniform counts-based pools have one range per eligible rating; preserve Deck, Session, grading, prefetch and failure semantics unchanged.
+
+**Alternatives:** Keep schema-2 per-shard startup lists, add a required auxiliary browser index, commit generated shards, use LFS, or download moving raw sources during builds.
+
+**Reason:** Exact rating counts eliminate per-shard startup overhead without biasing selection or changing checkpoints. Group inventories authenticate full compressed-file hashes/lengths/counts, canonical logical digests and stable group-specific provenance, while staying out of browser startup. An ordinary snapshot must not change puzzle identity/archive bytes. Deterministic engine-free conversion preserves every published record/grade and compares independent before/after signatures; separate deterministic streamed archives preserve the complete prepared corpus without duplicating it in application source.
+
+## 25. Cross-language manifest-last publication and frozen offline builds
+
+**Decision:** Share a diagnostic exclusive directory lock between Python and Node, retain Python reentrancy, bound waits, and never automatically steal a lock. Coordinate old writers before the protocol migration. Stage and validate complete groups separately, verify captured inputs are still current, promote immutable directories, and replace only the manifest atomically last. Never edit old versions or prune previous groups during publication. Freeze the selected input/lock under the same lock before full validation and build. Disable Vite public copying and explicitly copy non-training assets and the selected corpus allowlist.
+
+**Alternatives:** File locks unavailable to Node CI, deleting unreferenced files on export, reading a moving live tree during Vite, silently overwriting a competing publication, or implicit network repair during builds.
+
+**Reason:** Snapshot/release stability is a filesystem/integrity contract, not a Git staging operation. Interrupted evaluations, checkpoints and preparation samples remain reusable. Existing corrupt immutable directories require operator recovery; a failed hydration must preserve previous live data. Production builds are strictly offline and require an exact real retrieval lock. Explicit local prepared builds remain usable before publication, with a visible unpinned-preview marker. The exporter grading version/fingerprint bytes remain unchanged; packaging uses a separate format version.
+
+## 26. Verified release pins, bounded Pages retention, and manual bootstrap
+
+**Decision:** The root retrieval lock pins the exact current manifest, current archive descriptors, and at most one immediately previous distinct version per group, including actual immutable public URLs and full SHA-256/size/count/provenance. Hydration verifies cached/downloaded archives, enforces safe streamed extraction limits and complete staged-catalog validation, then publishes manifest-last. Local-release candidates are explicitly separate from production locks. Release uploads and the first real pin require owner action; never invent URLs or claim an unpublished release is retrievable.
+
+**Alternatives:** Mutable latest URLs, trusting cache names, retaining files only on an earlier Pages deployment, keeping every version forever in Pages, or automatic release publication/history rewriting.
+
+**Reason:** Whole-site replacement requires current and retained groups in every artifact. One previous version is bounded by versions, not elapsed time; frequent releases can expire tabs. Expired requests preserve current board/score/revision/reserved draw and allow Finish, then reload. The first schema-3 deployment does not retain legacy flat paths; disclose that migration limitation. Remote release assets outlive Pages retention. A 900 MiB total-site budget fails rather than silently dropping declared retention. Local backups/archives/index/evaluations are not automatically pruned. Generated source removal is blocked until verified backup, usable local archives, and empty-cache remote retrieval/build/browser gates pass; historical blob cleanup is separately authorized and not implemented here.
+
+## 27. Corresponding frontend source without a duplicate CC0 corpus; measured budgets
+
+**Decision:** Stream corresponding frontend source, tools, tests, lockfiles, docs, theme assets/notices, the real production retrieval lock and the existing dependency source/license subsets into `source.zip`, excluding generated `public/training/**`. Retrieve the CC0 corpus via its verified lock/tools instead of bundling it twice. Keep frontend GPL source availability unchanged. Gate compact-manifest, per-shard, initial-request/body, source-ZIP and selected-site byte budgets; add five-context controlled desktop/mobile timing measurements and separately identify actual deployed smoke measurements.
+
+**Alternatives:** A source ZIP as large as the entire site, omitting GPL frontend source, claiming lazy loading alone proves acceptable latency, or presenting targets/historical scout observations as measured improvements.
+
+**Reason:** CC0 data distribution is independent of supplying the GPL application's corresponding source. Enforced budgets (64/24 KiB manifest raw/gzip, 64 KiB shards, 192 KiB initial training bodies, 10 MiB source, 900 MiB site) make full-corpus distribution auditable. Record median/max setup and first-playable timings, bytes/requests, dataset versions and environment under 100 ms / 1.6 Mbit/s / 4× CPU / disabled-cache conditions. Initial median timing gates are 3 s setup and 1.5 s first playable; flag >10% JS/CSS growth. Preserve historical measurements in HOSTING.md and clearly distinguish new observations, local controlled tests, and public Pages smoke tests.
