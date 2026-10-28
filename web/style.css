@@ -23,12 +23,15 @@ p { line-height: 1.6; }
 .brand-mark { font-size: 3rem; line-height: 1; color: var(--accent); }
 h1 { font-size: 1.2rem; font-weight: 600; letter-spacing: -.025em; margin: 0 0 3px; }
 h1 span { color: #737d73; margin: 0 .15rem; }
-.appearance { margin: -12px 0 22px; font-size: .8rem; color: var(--muted); }
+.appearance { margin: 28px 0 22px; font-size: .8rem; color: var(--muted); }
 .appearance summary { cursor: pointer; width: fit-content; }
-.theme-controls { display: flex; align-items: end; flex-wrap: wrap; gap: 12px 20px; padding-top: 14px; }
-.theme-controls label { display: grid; gap: 7px; font-size: .75rem; }
-.theme-controls select { min-width: 130px; border: 1px solid var(--border); background: #23282d; color: #e9e8e1; border-radius: 5px; padding: 8px 12px; }
-.theme-controls .help { margin: 0; padding-bottom: 6px; }
+.theme-controls { display: grid; gap: 14px; padding-top: 18px; }
+.theme-controls fieldset { display: flex; flex-wrap: wrap; gap: 7px; margin: 0; }
+.theme-controls legend { color: #bec2c2; margin-bottom: 9px; }
+.theme-controls button { font-size: .75rem; padding: 8px 12px; }
+.theme-controls button[aria-pressed=true] { border-color: var(--accent); color: var(--accent); }
+#theme-preview { width: min(100%, 280px); height: auto; aspect-ratio: 1; pointer-events: none; border-radius: 3px; overflow: hidden; }
+.theme-controls .help { margin: 0; }
 html:not([data-board-theme=brown]) cg-board { background-image: var(--board-image); background-size: 25% 25%; }
 html:not([data-piece-theme=cburnett]) .cg-wrap piece.white.king { background-image: var(--piece-wK); }
 html:not([data-piece-theme=cburnett]) .cg-wrap piece.white.queen { background-image: var(--piece-wQ); }

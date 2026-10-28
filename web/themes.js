@@ -1,3 +1,5 @@
+import { Chessground } from '@lichess-org/chessground';
+
 export const BOARD_THEMES = {
   brown: null, // Keep the existing Chessground brown board unchanged.
   blue: ['#dee3e6', '#8ca2ad'],
@@ -23,10 +25,46 @@ export function applyThemes(board, pieces, root = document.documentElement, base
 }
 
 export function initThemes() {
-  const board = document.getElementById('board-theme');
-  const pieces = document.getElementById('piece-theme');
-  const update = () => applyThemes(board.value, pieces.value);
-  board.addEventListener('change', update);
-  pieces.addEventListener('change', update);
+  const selected = { board: 'brown', pieces: 'cburnett' };
+  const preview = document.getElementById('theme-preview');
+  const update = (themes = selected) => {
+    applyThemes(themes.board, themes.pieces);
+    preview.setAttribute('aria-label', `${themes.board} board with ${themes.pieces} pieces preview`);
+  };
+  for (const [kind, id, variants] of [
+    ['board', 'board-theme', Object.keys(BOARD_THEMES)],
+    ['pieces', 'piece-theme', PIECE_THEMES],
+  ]) {
+    const group = document.getElementById(id);
+    for (const variant of variants) {
+      const button = document.createElement('button');
+      button.type = 'button';
+      button.textContent = variant[0].toUpperCase() + variant.slice(1);
+      button.dataset.theme = variant;
+      button.setAttribute('aria-pressed', String(selected[kind] === variant));
+      const show = () => update({ ...selected, [kind]: variant });
+      button.addEventListener('pointerenter', show);
+      button.addEventListener('focus', show);
+      button.addEventListener('pointerleave', () => update());
+      button.addEventListener('blur', () => update());
+      button.addEventListener('click', () => {
+        selected[kind] = variant;
+        for (const option of group.querySelectorAll('button')) {
+          option.setAttribute('aria-pressed', String(option === button));
+        }
+        update();
+      });
+      group.append(button);
+    }
+  }
+  // Create only when visible so Chessground measures the preview correctly.
+  let ground;
+  document.getElementById('appearance').addEventListener('toggle', (event) => {
+    update();
+    if (event.target.open && !ground) ground = Chessground(preview, {
+      fen: 'start', viewOnly: true, coordinates: false,
+      drawable: { enabled: false, visible: false },
+    });
+  });
   update();
 }

@@ -340,7 +340,7 @@ async function init() {
     const info = await api('info');
     ready = info.ready;
     $('data-status').textContent = ready
-      ? `${info.puzzles.toLocaleString()} puzzles · ${info.ordinary_positions.toLocaleString()} ordinary positions · ${info.sampled_games.toLocaleString()} sampled games`
+      ? `${info.puzzles.toLocaleString()} puzzles · ${info.ordinary_positions.toLocaleString()} ordinary positions`
       : info.error;
     // Sessions are deliberately tab-local and are not restored after a reload.
   } catch (error) {
