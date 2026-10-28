@@ -1,6 +1,6 @@
 # Free static hosting: feasibility and measurements
 
-Status: **the static migration and schema-3 release tooling are implemented**. This file retains historical feasibility measurements and adds a separately identified controlled full-corpus migration measurement below. See [README.md](README.md) and [CORPUS.md](CORPUS.md) for current retrieval/deployment instructions. Python is authoring-only, with no FastAPI runtime. Initial prepared release upload/pinning and an actual Pages smoke measurement remain owner actions; no public release availability is claimed.
+Status: **the static migration and schema-3 release tooling are implemented**. This file retains historical feasibility measurements and adds a separately identified controlled full-corpus migration measurement below. See [README.md](README.md) and [CORPUS.md](CORPUS.md) for current retrieval/deployment instructions. Python is authoring-only, with no FastAPI runtime. Prepared release [v0.1](https://github.com/Dont-Care-Didnt-Ask/maybe-puzzle/releases/tag/v0.1) is public and pinned; fresh remote retrieval, production build, and desktop/mobile browser checks passed. An actual public Pages smoke measurement remains separate from these local controlled checks.
 
 ## Recommendation: precompute all legal-move grades and serve a static app
 

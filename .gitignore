@@ -4,6 +4,7 @@ __pycache__/
 .ruff_cache/
 node_modules/
 dist/
+/public/training/
 data/*
 !data/.gitkeep
 !data/README.md

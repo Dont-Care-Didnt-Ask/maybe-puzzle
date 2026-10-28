@@ -4,7 +4,7 @@ The application sources and the prepared CC0 training corpus are separately dist
 
 ## Bootstrap status and safety
 
-The first release is **not yet public or pinned**. Do not invent URLs or commit a lock claiming assets exist. Until manual publication and fresh remote verification succeed, retain the original tracked `public/training/` unchanged and work in ignored `data/training/prepared`, `data/training/releases`, and `data/training/site`.
+The first release, [v0.1](https://github.com/Dont-Care-Didnt-Ask/maybe-puzzle/releases/tag/v0.1), is **public and pinned** by the root `training-data.lock.json`. Both archives were downloaded into a fresh cache and passed full integrity/record checks, a production build, and desktop/mobile browser tests. Generated `public/training/` is now ignored and populated by explicit hydration. The initial bootstrap procedure below remains the protocol for publishing and verifying future releases; never invent URLs or pin unavailable assets.
 
 Before changing authoring inputs/publication code, recheck processes, locks, worktree, branch, and actual remote refs. Do not interrupt Stockfish/import/export/snapshot jobs automatically. Coordinate a checkpoint-safe pause; old writers used a different lock and cannot safely run alongside new writers.
 
@@ -119,7 +119,7 @@ descriptor = {kind,version,file,sha256,bytes,file_count,extracted_bytes,count,pr
 
 Conversion/packaging never construct an engine, grade, download raw data, or alter preparation/checkpoint trees. `snapshot_corpus.py` may assemble completed compatible grades without Stockfish; schema-3 snapshots generate only ordinary groups, preserve all published records, and refuse shrinkage. Freeze with `--snapshot-root`; `--publish` separately updates the selected prepared output. Package this frozen release, not a Git staging worktree.
 
-## Manual release bootstrap — blocking owner action
+## Manual release publication (initial bootstrap completed for v0.1)
 
 1. Inspect conversion report, archive descriptors, validation, correctness/performance reports, and full backup inventory.
 2. Choose the **actual public release repository and immutable tag**. Authorize the two archive uploads explicitly. No tool here publishes releases.

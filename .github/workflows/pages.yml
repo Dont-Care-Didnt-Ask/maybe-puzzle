@@ -29,7 +29,7 @@ jobs:
           restore-keys: |
             training-archives-${{ runner.os }}-
       # Explicit verified prepared-data retrieval. Cache hits are rehashed too.
-      # Initial bootstrap deliberately fails until the owner publishes/pins real URLs.
+      # Published archive URLs, hashes, and sizes are pinned in training-data.lock.json.
       - run: npm run data:hydrate
       - run: npm run data:check
       - run: REQUIRE_TRAINING_DATA=1 npm test

@@ -10,7 +10,7 @@ The preserved official Lichess snapshot contains **6,157,341 puzzles**, includin
 
 Requirements: **Node.js 24**, `npm ci`, and prepared release data. Data is retrieved explicitly, not generated or downloaded implicitly by a build.
 
-### Pinned releases (after the owner completes the first release)
+### Pinned releases
 
 ```sh
 npm ci
@@ -27,7 +27,7 @@ Subsequent hydration can be entirely offline:
 npm run data:hydrate -- --offline    # requires all pinned archives in the verified cache
 ```
 
-**Bootstrap status:** No public release URLs or production `training-data.lock.json` have been fabricated. Until the owner uploads the locally prepared archives and pins their actual immutable URLs, the production hydration/build and Pages workflow deliberately fail with instructions. The original tracked `public/training/` remains intact during this gate. See [CORPUS.md](CORPUS.md) for the exact owner procedure and recovery rules.
+**Published data:** [Release v0.1](https://github.com/Dont-Care-Didnt-Ask/maybe-puzzle/releases/tag/v0.1) supplies the prepared archives pinned by `training-data.lock.json`. Fresh remote downloads, integrity checks, a production build, and desktop/mobile browser checks have passed. Generated `public/training/` files are ignored rather than committed; hydrate explicitly before development or deployment. See [CORPUS.md](CORPUS.md) for release updates and recovery rules.
 
 ### Local prepared data / unpublished release candidate
 
@@ -43,7 +43,7 @@ npm run preview
 
 This build is visibly marked **UNPINNED LOCAL PREVIEW**, not a production deployment. It still validates all group inventories, file hashes, records, ordinary move coverage, exact ratings, IDs, games, and overlap. Do not substitute synthetic fixtures or stale `dist` for missing data.
 
-For normal development, run `npm run dev` after explicit hydration to `public/training`. During bootstrap keep using the isolated site above and its production preview; this avoids changing the formerly tracked manifest. Source downloads are generated during a build, not by the Vite development server. Do not open the app as a `file://` URL.
+For normal development, run `npm run dev` after explicit hydration to `public/training`. Unpublished candidates can use the isolated site above and its production preview. Source downloads are generated during a build, not by the Vite development server. Do not open the app as a `file://` URL.
 
 ## Publication and GitHub Pages
 
@@ -150,7 +150,7 @@ Budgets: manifest **64 KiB raw / 24 KiB gzip**, every compressed shard **64 KiB*
 ```text
 index.html, web/            static UI, rules, sessions, compact lazy loader
 training-data.lock.json    real prepared release pins (only after owner publication)
-public/training/           hydration target; legacy tracked files temporarily retained at bootstrap
+public/training/           ignored hydration target; populated from pinned release archives
 scripts/                   verified hydration, offline build, validation, source ZIP
 training_assets.py         deterministic groups, inventories, freezing, locks
 package_corpus.py          engine-free conversion/release archives
