@@ -7,35 +7,87 @@ Uses an on-disk SQLite sort/index rather than keeping millions of records in RAM
 
 import argparse
 import csv
-import gzip
-import hashlib
 import json
 import sqlite3
 import sys
+import tempfile
+from contextlib import closing
 from datetime import UTC, datetime
 from pathlib import Path
 
 import chess
 
-from export_static import encoded, export_assets
 from prepare import PUZZLES_URL, ROOT, download, position_key, text_source
+from training_assets import (
+    MAX_SAFE_INTEGER,
+    PUZZLE_SHARD_SIZE,
+    check_manifest,
+    encoded,
+    export_assets,
+    file_digest,
+    frozen_catalog,
+    publication_lock,
+)
+from training_assets import read_group as read_group
 
 
-def file_digest(path: Path) -> str:
-    with path.open("rb") as stream:
-        return hashlib.file_digest(stream, "sha256").hexdigest()
+def _index_snapshot(destination: Path):
+    """Read the completion marker and identity of an immutable published inode.
+
+    Callers hold publication_lock(destination). Reading metadata is cheap even for
+    multi-gigabyte indexes; published databases are replaced, never edited in place.
+    """
+    try:
+        status = destination.stat()
+    except FileNotFoundError:
+        return None, None
+    identity = (status.st_dev, status.st_ino, status.st_size, status.st_mtime_ns)
+    with closing(
+        sqlite3.connect(f"{destination.as_uri()}?mode=ro&immutable=1", uri=True)
+    ) as database:
+        rows = database.execute("SELECT value FROM metadata").fetchall()
+    if len(rows) != 1:
+        raise ValueError("Puzzle index has no unique completion metadata; previous index unchanged")
+    stats = json.loads(rows[0][0])
+    if (
+        not isinstance(stats, dict)
+        or type(stats.get("retained")) is not int
+        or stats["retained"] <= 0
+    ):
+        raise ValueError("Puzzle index has incomplete metadata; previous index unchanged")
+    return identity, stats
+
+
+def _index_changed():
+    return ValueError("Puzzle index changed during indexing; nothing replaced, retry")
+
+
+def _reuse_index(stats):
+    print(f"Using complete puzzle index: {stats['retained']:,} puzzles", flush=True)
+    return stats
 
 
 def build_index(source: Path, destination: Path) -> dict:
+    destination = Path(destination).resolve()
+    # Snapshot before the potentially very long source hash. A concurrent winner
+    # must not be overwritten, including when we would otherwise reuse this index.
+    with publication_lock(destination):
+        initial = _index_snapshot(destination)
     fingerprint = file_digest(source)
-    if destination.exists():
-        with sqlite3.connect(destination) as database:
-            stats = json.loads(database.execute("SELECT value FROM metadata").fetchone()[0])
-        if stats.get("source_sha256") == fingerprint:
-            print(f"Using complete puzzle index: {stats['retained']:,} puzzles", flush=True)
-            return stats
-    temporary = destination.with_suffix(".building")
-    temporary.unlink(missing_ok=True)
+    with publication_lock(destination):
+        current = _index_snapshot(destination)
+        if current[1] is not None and current[1].get("source_sha256") == fingerprint:
+            if (
+                initial[1] is not None
+                and initial[1].get("source_sha256") == fingerprint
+                and current[1] != initial[1]
+            ):
+                raise _index_changed()
+            # Another importer may have completed this same frozen archive
+            # during our source hash. Do not needlessly replay it all again.
+            return _reuse_index(current[1])
+        if current != initial:
+            raise _index_changed()
     stats = {
         "source_sha256": fingerprint,
         "source_rows": 0,
@@ -44,7 +96,30 @@ def build_index(source: Path, destination: Path) -> dict:
         "quality_filter": "none",
         "validation": "full legal replay (python-chess)",
     }
-    with sqlite3.connect(temporary) as database:
+    temporary = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            prefix=f".{destination.name}-", suffix=".building", dir=destination.parent, delete=False
+        ) as stream:
+            temporary = Path(stream.name)
+        _populate_index(source, temporary, stats)
+        if file_digest(source) != fingerprint:
+            raise ValueError("Puzzle archive changed while indexing; retry with a frozen source")
+        with publication_lock(destination):
+            current = _index_snapshot(destination)
+            if current != initial:
+                if current[1] == stats:
+                    return _reuse_index(current[1])
+                raise _index_changed()
+            temporary.replace(destination)
+        return stats
+    finally:
+        if temporary is not None:
+            temporary.unlink(missing_ok=True)
+
+
+def _populate_index(source: Path, temporary: Path, stats: dict):
+    with closing(sqlite3.connect(temporary)) as database, database:
         database.execute("PRAGMA journal_mode=OFF")
         database.execute("PRAGMA synchronous=OFF")
         database.execute("PRAGMA cache_size=-65536")
@@ -64,7 +139,12 @@ def build_index(source: Path, destination: Path) -> dict:
                         "url": f"https://lichess.org/training/{row['PuzzleId']}",
                     }
                     board = chess.Board(record["fen"])
-                    if not record["id"] or not board.is_valid() or len(record["moves"]) < 2:
+                    if (
+                        not record["id"]
+                        or not board.is_valid()
+                        or len(record["moves"]) < 2
+                        or not -MAX_SAFE_INTEGER <= record["rating"] <= MAX_SAFE_INTEGER
+                    ):
                         raise ValueError("Invalid puzzle")
                     board.push_uci(record["moves"][0])
                     key = position_key(board)
@@ -96,20 +176,19 @@ def build_index(source: Path, destination: Path) -> dict:
         ).fetchone()[0]
         database.execute("CREATE TABLE metadata (value TEXT NOT NULL)")
         database.execute("INSERT INTO metadata VALUES (?)", (json.dumps(stats),))
-    temporary.replace(destination)
-    return stats
 
 
-def read_group(directory: Path, group: dict):
-    for shard in group["shards"]:
-        yield from json.loads(gzip.decompress((directory / shard["file"]).read_bytes()))
-
-
-def publish(index: Path, output: Path, source: str, stats: dict, shard_size=2048):
-    previous = json.loads((output / "manifest.json").read_text())
-    with sqlite3.connect(index) as database:
+def publish(index: Path, output: Path, source: str, stats: dict, shard_size=PUZZLE_SHARD_SIZE):
+    with (
+        frozen_catalog(output) as frozen,
+        sqlite3.connect(f"{index.resolve().as_uri()}?mode=ro", uri=True) as database,
+    ):
+        previous = frozen.manifest
+        actual_stats = json.loads(database.execute("SELECT value FROM metadata").fetchone()[0])
+        if actual_stats != stats:
+            raise ValueError("Puzzle index changed before publication; retry")
         positions = []
-        for record in read_group(output, previous["ordinary"]):
+        for record in read_group(frozen.directory, previous["ordinary"], "ordinary"):
             board = chess.Board(record["fen"])
             board.push_uci(record["moves"][0])
             overlap = database.execute(
@@ -136,9 +215,14 @@ def publish(index: Path, output: Path, source: str, stats: dict, shard_size=2048
                 record["position_key"] = key
                 yield record
 
-        records = records()
         manifest = export_assets(
-            output, records, positions, metadata, compact_ratings=True, puzzle_shard_size=shard_size
+            output,
+            records(),
+            positions,
+            metadata,
+            puzzle_shard_size=shard_size,
+            expected_manifest_digest=frozen.manifest_sha256,
+            pre_promote=lambda: check_manifest(output, frozen.manifest_sha256),
         )
     print(
         f"Published {manifest['puzzles']['count']:,} puzzles "
@@ -155,10 +239,10 @@ def main():
     parser.add_argument("--source", default=PUZZLES_URL)
     parser.add_argument("--data-dir", type=Path, default=ROOT / "data")
     parser.add_argument("--output", type=Path, default=ROOT / "public/training")
-    parser.add_argument("--shard-size", type=int, default=2048)
+    parser.add_argument(
+        "--shard-size", type=int, choices=range(128, 257), default=PUZZLE_SHARD_SIZE
+    )
     args = parser.parse_args()
-    if args.shard_size <= 0:
-        parser.error("shard-size must be positive")
     args.data_dir.mkdir(parents=True, exist_ok=True)
     cache = args.data_dir / "cache"
     cache.mkdir(exist_ok=True)

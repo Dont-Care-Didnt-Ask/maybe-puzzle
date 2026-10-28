@@ -12,6 +12,7 @@ from prepare import save_json
 from snapshot_corpus import snapshot_corpus
 from tests.test_export import FakeEngine
 from tests.test_full_corpus import ordinary_record, puzzle_archive
+from training_assets import group_files
 
 
 def fixture(tmp_path):
@@ -64,7 +65,9 @@ def checkpoint(directory, config, setup, game, *, prefilter=True):
     return path
 
 
-def test_snapshot_reuses_only_matching_complete_nonoverlapping_distinct_game_grades(tmp_path):
+def test_snapshot_reuses_only_matching_complete_nonoverlapping_distinct_game_grades(
+    tmp_path, monkeypatch
+):
     directory, output, index, config, baseline = fixture(tmp_path)
     checkpoint(directory, config, "c2c4", "new")
     checkpoint(directory, config, "f2f4", "new")  # Same game: only one may survive.
@@ -74,7 +77,14 @@ def test_snapshot_reuses_only_matching_complete_nonoverlapping_distinct_game_gra
     (directory / "static-checkpoints" / "unfinished.json.tmp").write_text("incomplete")
     previous = (output / "manifest.json").read_bytes()
     root = tmp_path / "snapshot"
+    checkpoint_bytes = {path: path.read_bytes() for path in directory.rglob("*") if path.is_file()}
+
+    def forbidden(*args, **kwargs):
+        pytest.fail("Snapshot invoked an engine")
+
+    monkeypatch.setattr("engine.Engine.__init__", forbidden)
     manifest = snapshot_corpus(directory, output, index, root)
+    assert all(path.read_bytes() == raw for path, raw in checkpoint_bytes.items())
     assert manifest["ordinary"]["count"] == 2
     assert manifest["checkpoint_snapshot"] == {"qualified": 2, "target": 30000, "complete": False}
     assert (output / "manifest.json").read_bytes() == previous
@@ -90,7 +100,7 @@ def test_published_snapshot_remains_stable_after_another_publication(tmp_path):
     root = tmp_path / "snapshot"
     manifest = snapshot_corpus(directory, output, index, root, publish=True)
     assert json.loads((output / "manifest.json").read_text())["ordinary"]["count"] == 2
-    # Simulate a later background publication cleaning up the snapshot's old shards.
+    # A later publication retains old groups; the snapshot still has its own links.
     export_assets(
         output, None, [baseline], {}, compact_ratings=True, puzzle_group=manifest["puzzles"]
     )
@@ -100,22 +110,22 @@ def test_published_snapshot_remains_stable_after_another_publication(tmp_path):
     ).read_text()
 
 
-def test_git_can_stage_frozen_files_independently_of_the_live_worktree(tmp_path):
+def test_snapshot_freezes_both_inventories_and_shards_and_only_regenerates_ordinary(tmp_path):
     directory, output, index, config, _ = fixture(tmp_path)
+    previous = json.loads((output / "manifest.json").read_bytes())
     checkpoint(directory, config, "c2c4", "new")
-    root, repository = tmp_path / "snapshot", tmp_path / "repository"
+    root = tmp_path / "snapshot"
     manifest = snapshot_corpus(directory, output, index, root)
-    subprocess.run(["git", "init", "-q", str(repository)], check=True)
-    command = ["git", f"--git-dir={repository / '.git'}", f"--work-tree={root}"]
-    subprocess.run([*command, "add", "-A", "--", "public/training"], cwd=root, check=True)
-    staged = json.loads(
-        subprocess.check_output([*command, "show", ":public/training/manifest.json"], cwd=root)
-    )
-    assert staged == manifest
-    assert staged["ordinary"]["count"] == 2
-    assert json.loads((output / "manifest.json").read_text())["ordinary"]["count"] == 1
-    files = subprocess.check_output([*command, "ls-files"], cwd=root, text=True).splitlines()
-    assert files and all(name.startswith("public/training/") for name in files)
+    destination = root / "public/training"
+    assert manifest["puzzles"] == previous["puzzles"]
+    assert manifest["ordinary"]["version"] != previous["ordinary"]["version"]
+    assert json.loads((destination / "manifest.json").read_bytes()) == manifest
+    for kind in ("puzzles", "ordinary"):
+        files = list(group_files(destination, manifest[kind], kind))
+        assert any(path.name == "inventory.json" for path in files)
+        assert all((destination / path).is_file() for path in files)
+        assert len(list(read_group(destination, manifest[kind], kind))) == manifest[kind]["count"]
+    assert json.loads((output / "manifest.json").read_bytes()) == previous
 
 
 def test_invalid_checkpoint_cannot_replace_public_assets(tmp_path):
@@ -152,3 +162,23 @@ def test_publication_lock_is_reentrant_and_serializes_other_processes(tmp_path):
             raise
     assert process.wait(timeout=10) == 0
     assert acquired.exists()
+
+
+def test_changed_authoring_inputs_abort_snapshot_before_publication(tmp_path, monkeypatch):
+    import snapshot_corpus as snapshots
+
+    directory, output, index, config, _ = fixture(tmp_path)
+    checkpoint(directory, config, "c2c4", "new")
+    previous = (output / "manifest.json").read_bytes()
+    original = snapshots.completed_records
+
+    def changed(*args):
+        yield from original(*args)
+        source_path = directory / "manifest.json"
+        source = json.loads(source_path.read_bytes())
+        save_json(source_path, {**source, "seed": 123})
+
+    monkeypatch.setattr(snapshots, "completed_records", changed)
+    with pytest.raises(ValueError, match="Authoring input manifest changed"):
+        snapshot_corpus(directory, output, index, tmp_path / "snapshot", publish=True)
+    assert (output / "manifest.json").read_bytes() == previous

@@ -11,16 +11,25 @@ import json
 import os
 import random
 import signal
+import sqlite3
 import subprocess
 import sys
+import tempfile
 import time
+from contextlib import closing
 from datetime import UTC, datetime
 from pathlib import Path
 
 import chess.pgn
 
-from import_puzzles import read_group
 from prepare import GAMES_URL, ROOT, download, reservoir_add, save_json, unpack_pgn
+from training_assets import (
+    check_manifest,
+    file_digest,
+    frozen_catalog,
+    publication_lock,
+    read_group,
+)
 
 
 def prepare_games(
@@ -40,8 +49,11 @@ def prepare_games(
         if cached.get("expansion_config") == config and "source_grading" in cached:
             print(f"Using prepared expansion inputs: {directory}", flush=True)
             return
-    manifest = json.loads((output / "manifest.json").read_text())
-    positions = list(read_group(output, manifest["ordinary"]))
+    source_fingerprint = file_digest(source)
+    with frozen_catalog(output) as frozen:
+        manifest = frozen.manifest
+        expected_catalog = frozen.manifest_sha256
+        positions = list(read_group(frozen.directory, manifest["ordinary"], "ordinary"))
     required = {p["url"].split("#")[0] for p in positions}
     rng, spans, preserved, seen = random.Random(seed), [], {}, 0
     print(
@@ -76,38 +88,90 @@ def prepare_games(
         raise ValueError(f"Only {seen:,} qualifying games, need {count:,}")
     spans = sorted(set(spans) | set(preserved.values()))
     rng.shuffle(spans)
+
+    def check_source(*, deep=False):
+        if (source.stat().st_size, source.stat().st_mtime_ns) != (
+            config["source_size"],
+            config["source_mtime_ns"],
+        ) or (deep and file_digest(source) != source_fingerprint):
+            raise ValueError("Source PGN changed during sampling; retry with frozen source games")
+
+    check_source()
     directory.mkdir(parents=True, exist_ok=True)
-    temporary = directory / "games.pgn.tmp"
-    with source.open("rb") as stream, temporary.open("wb") as destination:
-        for start, end in spans:
-            stream.seek(start)
-            destination.write(stream.read(end - start))
-            destination.write(b"\n\n")
-    temporary.replace(directory / "games.pgn")
-    save_json(directory / "positions.json", positions)
-    save_json(
-        marker,
-        {
-            "expansion_config": config,
-            "source_grading": {
-                "engine": manifest.get("engine"),
-                "nodes": manifest.get("nodes"),
-                "version": manifest.get("exporter_version"),
-                "tolerance_cp": manifest.get("tolerance_cp"),
-            },
-            "prepared_at": datetime.now(UTC).isoformat(),
-            "seed": seed,
-            "games_source": source_label or str(source.resolve()),
-            "puzzles_source": manifest["source_puzzles"],
-            "eligible_games": seen,
-            "sampled_games": len(spans),
-            "min_rating": 1800,
-            "min_ply": 20,
-            "max_ply": 160,
-            "nodes": 100_000,
-        },
-    )
+    temporary = None
+    try:
+        with (
+            source.open("rb") as stream,
+            tempfile.NamedTemporaryFile(
+                prefix=".games-", suffix=".pgn.tmp", dir=directory, delete=False
+            ) as destination,
+        ):
+            temporary = Path(destination.name)
+            for start, end in spans:
+                stream.seek(start)
+                content = stream.read(end - start)
+                if len(content) != end - start:
+                    raise ValueError(
+                        "Source PGN truncated during copying; previous inputs unchanged"
+                    )
+                destination.write(content)
+                destination.write(b"\n\n")
+        check_source(deep=True)
+        with publication_lock(output):
+            check_manifest(output, expected_catalog)
+            check_source()
+            temporary.replace(directory / "games.pgn")
+            save_json(directory / "positions.json", positions)
+            save_json(
+                marker,
+                {
+                    "expansion_config": config,
+                    "source_grading": {
+                        "engine": manifest.get("engine"),
+                        "nodes": manifest.get("nodes"),
+                        "version": manifest.get("exporter_version"),
+                        "tolerance_cp": manifest.get("tolerance_cp"),
+                    },
+                    "prepared_at": datetime.now(UTC).isoformat(),
+                    "seed": seed,
+                    "games_source": source_label or str(source.resolve()),
+                    "puzzles_source": manifest["source_puzzles"],
+                    "eligible_games": seen,
+                    "sampled_games": len(spans),
+                    "min_rating": 1800,
+                    "min_ply": 20,
+                    "max_ply": 160,
+                    "nodes": 100_000,
+                },
+            )
+    finally:
+        if temporary is not None:
+            temporary.unlink(missing_ok=True)
     print(f"Prepared {len(spans):,} of {seen:,} games for full grading", flush=True)
+
+
+def puzzles_ready(output: Path, index: Path) -> bool:
+    """Only a complete index matching the published import provenance is ready.
+
+    Read just the small manifest/completion marker, not the full corpus. An
+    absent catalog or a concurrently incomplete SQLite file means keep waiting;
+    mode=ro must never create a missing index as a side effect of polling.
+    """
+    try:
+        with publication_lock(output):
+            manifest = json.loads((Path(output) / "manifest.json").read_bytes())
+        if not isinstance(manifest, dict) or manifest.get("schema") != 3:
+            return False
+        expected = manifest.get("puzzle_import")
+        if not isinstance(expected, dict) or not expected:
+            return False
+        with closing(
+            sqlite3.connect(f"{Path(index).resolve().as_uri()}?mode=ro", uri=True)
+        ) as database:
+            rows = database.execute("SELECT value FROM metadata").fetchall()
+        return len(rows) == 1 and json.loads(rows[0][0]) == expected
+    except (FileNotFoundError, sqlite3.Error, json.JSONDecodeError, TypeError):
+        return False
 
 
 def main():
@@ -142,10 +206,7 @@ def main():
         return
     if args.wait_for_puzzles:
         print("Waiting for the full puzzle catalog/index before grading…", flush=True)
-        while True:
-            manifest = json.loads((args.output / "manifest.json").read_text())
-            if manifest["schema"] == 2 and args.puzzle_index.exists():
-                break
+        while not puzzles_ready(args.output, args.puzzle_index):
             time.sleep(5)
     command = [
         sys.executable,
@@ -182,7 +243,11 @@ def main():
         if result:
             raise SystemExit(result)
     if args.build:
-        subprocess.run(["npm", "run", "build"], cwd=ROOT, check=True)
+        subprocess.run(
+            ["npm", "run", "build", "--", "--training-dir", str(args.output.resolve()), "--local"],
+            cwd=ROOT,
+            check=True,
+        )
 
 
 if __name__ == "__main__":

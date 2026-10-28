@@ -1,15 +1,14 @@
-"""Freeze completed checkpoint results for publication/committing, without Stockfish.
+"""Freeze completed grades without Stockfish, downloads, Git, or checkpoint writes.
 
-uv run python snapshot_corpus.py --publish --snapshot-root /tmp/chess-snapshot
-The snapshot root contains public/training/ for staging with an alternate worktree.
-Engine workers can keep running; only the short publication section is locked.
+uv run python snapshot_corpus.py --output data/training/local --snapshot-root /tmp/chess-snapshot
+The snapshot contains public/training/ with both complete immutable groups and a
+manifest. Only the ordinary group is regenerated; the puzzle version is reused.
 """
 
 import argparse
+import hashlib
 import json
-import os
 import re
-import shutil
 import sqlite3
 import tempfile
 from datetime import UTC, datetime
@@ -17,9 +16,21 @@ from pathlib import Path
 
 import chess
 
-from export_static import VERSION, digest, export_assets, publication_lock
-from import_puzzles import read_group
-from prepare import ROOT, position_key, save_json
+from export_static import VERSION
+from prepare import ROOT, position_key
+from training_assets import (
+    KINDS,
+    atomic_bytes,
+    check_manifest,
+    copy_group,
+    digest,
+    encoded,
+    export_assets,
+    file_digest,
+    frozen_catalog,
+    publication_lock,
+    read_group,
+)
 
 
 def validated_key(record):
@@ -62,8 +73,7 @@ def validated_key(record):
 
 def completed_records(directory, published, config):
     yield from published
-    # List only completed atomic JSON files, not in-progress .tmp writes. Later
-    # checkpoints belong to the next snapshot; existing files are immutable.
+    # Only atomically completed files in this fixed list belong to this snapshot.
     for path in sorted((directory / "static-checkpoints").glob("*.json")):
         checkpoint = json.loads(path.read_text())
         record = checkpoint.get("record")
@@ -79,26 +89,30 @@ def completed_records(directory, published, config):
 
 
 def freeze_files(output, destination, manifest):
+    """Retain exact immutable inventories/shards for both groups, manifest last."""
     destination.mkdir(parents=True)
-    for group in ("puzzles", "ordinary"):
-        for shard in manifest[group]["shards"]:
-            source, target = output / shard["file"], destination / shard["file"]
-            try:
-                os.link(source, target)
-            except OSError:
-                shutil.copyfile(source, target)
-    save_json(destination / "manifest.json", manifest)
+    with publication_lock(output):
+        for kind in KINDS:
+            copy_group(output, destination, manifest[kind], kind)
+        atomic_bytes(destination / "manifest.json", encoded(manifest) + b"\n")
 
 
 def snapshot_corpus(directory, output, index, snapshot_root, *, publish=False, target=30_000):
+    directory, output, index, snapshot_root = map(Path, (directory, output, index, snapshot_root))
     destination = snapshot_root / "public/training"
     if destination.exists():
         raise ValueError("Snapshot public/training directory must not already exist")
-    source = json.loads((directory / "manifest.json").read_text())
-    with publication_lock(output):
-        catalog = json.loads((output / "manifest.json").read_text())
-        if catalog["schema"] != 2 or catalog["exporter_version"] != VERSION:
-            raise ValueError("Snapshot requires a compatible full puzzle catalog")
+    source_path = directory / "manifest.json"
+    source_raw = source_path.read_bytes()
+    source = json.loads(source_raw)
+    source_fingerprint = hashlib.sha256(source_raw).hexdigest()
+    with frozen_catalog(output) as frozen:
+        catalog = frozen.manifest
+        if catalog["schema"] != 3 or catalog.get("exporter_version") != VERSION:
+            raise ValueError(
+                "Snapshot requires a compatible schema-3 full puzzle catalog; "
+                "convert legacy catalogs with package_corpus.py convert first"
+            )
         config = {
             "engine": catalog["engine"],
             "nodes": source["nodes"],
@@ -112,7 +126,7 @@ def snapshot_corpus(directory, output, index, snapshot_root, *, publish=False, t
             stats = json.loads(database.execute("SELECT value FROM metadata").fetchone()[0])
             if stats != catalog["puzzle_import"]:
                 raise ValueError("Puzzle overlap index does not match the public catalog")
-            published = read_group(output, catalog["ordinary"])
+            published = read_group(frozen.directory, catalog["ordinary"], "ordinary")
             for record in completed_records(directory, published, config):
                 key = validated_key(record)
                 game = record.get("url", "").split("#")[0]
@@ -133,7 +147,7 @@ def snapshot_corpus(directory, output, index, snapshot_root, *, publish=False, t
         metadata = {
             key: value
             for key, value in catalog.items()
-            if key not in {"schema", "dataset_id", "puzzles", "ordinary"}
+            if key not in {"schema", "dataset_id", *KINDS}
         }
         metadata.update(
             prepared_at=datetime.now(UTC).isoformat(),
@@ -142,40 +156,43 @@ def snapshot_corpus(directory, output, index, snapshot_root, *, publish=False, t
             source_seed=source["seed"],
             source_prepared_at=source["prepared_at"],
             min_rating=source["min_rating"],
-            min_ply=source["min_ply"],
-            max_ply=source["max_ply"],
+            min_ply=source.get("min_ply", 20),
+            max_ply=source.get("max_ply", 160),
             checkpoint_snapshot={
                 "target": target,
                 "qualified": len(accepted),
                 "complete": len(accepted) >= target,
             },
         )
+
+        def check_inputs():
+            check_manifest(output, frozen.manifest_sha256)
+            if file_digest(source_path) != source_fingerprint:
+                raise ValueError("Authoring input manifest changed during snapshot; retry")
+
         if publish:
             manifest = export_assets(
                 output,
                 None,
                 accepted,
                 metadata,
-                compact_ratings=True,
                 puzzle_group=catalog["puzzles"],
+                expected_manifest_digest=frozen.manifest_sha256,
+                pre_promote=check_inputs,
             )
-            # Hardlinks keep these exact bytes available even if a running exporter
-            # later replaces the live manifest and deletes its obsolete shards.
             freeze_files(output, destination, manifest)
         else:
             destination.mkdir(parents=True)
-            for shard in catalog["puzzles"]["shards"]:
-                try:
-                    os.link(output / shard["file"], destination / shard["file"])
-                except OSError:
-                    shutil.copyfile(output / shard["file"], destination / shard["file"])
+            copy_group(frozen.directory, destination, catalog["puzzles"], "puzzles")
             manifest = export_assets(
                 destination,
                 None,
                 accepted,
                 metadata,
-                compact_ratings=True,
                 puzzle_group=catalog["puzzles"],
+                expected_manifest_digest=None,
+                pre_promote=check_inputs,
+                source_directories=[output],
             )
     print(
         f"Frozen {len(accepted):,}/{target:,} qualified ordinary positions and "
@@ -191,9 +208,7 @@ def main():
     parser.add_argument("--output", type=Path, default=ROOT / "public/training")
     parser.add_argument("--puzzle-index", type=Path, default=ROOT / "data/puzzle-index.sqlite3")
     parser.add_argument("--snapshot-root", type=Path)
-    parser.add_argument(
-        "--publish", action="store_true", help="Also update the live public dataset"
-    )
+    parser.add_argument("--publish", action="store_true", help="Also update --output")
     args = parser.parse_args()
     if not args.publish and args.snapshot_root is None:
         parser.error("Use --publish and/or --snapshot-root to retain the snapshot")

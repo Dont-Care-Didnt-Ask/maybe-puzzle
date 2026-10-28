@@ -5,7 +5,6 @@ Safe to interrupt: successful evaluations and rejections are checkpointed per ca
 """
 
 import argparse
-import gzip
 import hashlib
 import json
 import os
@@ -13,10 +12,7 @@ import random
 import signal
 import sqlite3
 import sys
-import tempfile
-import threading
 from concurrent.futures import FIRST_COMPLETED, ProcessPoolExecutor, wait
-from contextlib import contextmanager
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -25,42 +21,19 @@ import chess.pgn
 
 from engine import Engine
 from prepare import ROOT, position_key, save_json
+from training_assets import (
+    PUZZLE_SHARD_SIZE,
+    digest,
+    export_assets,
+    file_digest,
+    frozen_catalog,
+    manifest_digest,
+    publication_lock,
+)
+from training_assets import encoded as encoded
 
 VERSION = 1
 _WORKER_ENGINE = None
-_PUBLICATION_LOCKS = threading.local()
-
-
-@contextmanager
-def publication_lock(output: Path):
-    """Serialize publication/snapshot reads, without blocking engine evaluations."""
-    import fcntl
-
-    key = str(output.resolve())
-    held = getattr(_PUBLICATION_LOCKS, "held", None)
-    if held is None:
-        held = _PUBLICATION_LOCKS.held = set()
-    if key in held:
-        yield
-        return
-    name = hashlib.sha256(key.encode()).hexdigest()
-    path = Path(tempfile.gettempdir()) / f"chess-training-publication-{name}.lock"
-    with path.open("a") as stream:
-        fcntl.flock(stream, fcntl.LOCK_EX)
-        held.add(key)
-        try:
-            yield
-        finally:
-            held.remove(key)
-            fcntl.flock(stream, fcntl.LOCK_UN)
-
-
-def encoded(value) -> bytes:
-    return json.dumps(value, separators=(",", ":"), sort_keys=True).encode()
-
-
-def digest(value) -> str:
-    return hashlib.sha256(encoded(value)).hexdigest()
 
 
 def init_worker(nodes: int):
@@ -216,82 +189,6 @@ def candidates(
     yield from deferred
 
 
-def _export_assets(
-    output: Path,
-    puzzles,
-    positions,
-    metadata: dict,
-    shard_size=64,
-    *,
-    compact_ratings=False,
-    puzzle_shard_size=None,
-    puzzle_group=None,
-):
-    """Stream hashed shards; schema 2 groups puzzles by one exact rating per shard.
-
-    puzzle_group can reuse an already published catalog in this same output directory.
-    The manifest is replaced last, and unreferenced shards are removed afterward.
-    """
-    output.mkdir(parents=True, exist_ok=True)
-    referenced = {s["file"] for s in puzzle_group["shards"]} if puzzle_group else set()
-
-    def shards(records, prefix, ratings=False):
-        result, total = [], 0
-        size = (puzzle_shard_size or shard_size) if ratings else shard_size
-
-        def batches():
-            batch = []
-            for record in records:
-                if batch and (
-                    len(batch) == size
-                    or (ratings and compact_ratings and record["rating"] != batch[0]["rating"])
-                ):
-                    yield batch
-                    batch = []
-                batch.append(record)
-            if batch:
-                yield batch
-
-        for batch in batches():
-            content = gzip.compress(encoded(batch), compresslevel=6, mtime=0)
-            name = f"{prefix}-{hashlib.sha256(content).hexdigest()[:20]}.json.gz"
-            path = output / name
-            if not path.exists():
-                temporary = path.with_suffix(".tmp")
-                temporary.write_bytes(content)
-                temporary.replace(path)
-            referenced.add(name)
-            entry = {"file": name, "count": len(batch)}
-            if ratings:
-                if compact_ratings:
-                    entry["rating"] = batch[0]["rating"]
-                else:
-                    entry["ratings"] = [p["rating"] for p in batch]
-            result.append(entry)
-            total += len(batch)
-        return {"count": total, "shards": result}
-
-    manifest = {
-        "schema": 2 if compact_ratings else 1,
-        "tolerance_cp": 50,
-        **metadata,
-        "puzzles": puzzle_group or shards(puzzles, "p", ratings=True),
-        "ordinary": shards(positions, "n"),
-    }
-    manifest["dataset_id"] = digest(manifest)[:20]
-    save_json(output / "manifest.json", manifest)
-    for path in output.glob("*.json.gz"):
-        if path.name not in referenced:
-            path.unlink()
-    return manifest
-
-
-def export_assets(output: Path, *args, **kwargs):
-    """Publish a complete manifest/shard set under the shared publication lock."""
-    with publication_lock(output):
-        return _export_assets(output, *args, **kwargs)
-
-
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--data-dir", type=Path, default=ROOT / "data")
@@ -307,21 +204,39 @@ def main():
         "--puzzle-index", type=Path, help="Full-archive SQLite overlap index from import_puzzles.py"
     )
     parser.add_argument("--nodes", type=int, help="Default: source preparation budget")
-    parser.add_argument("--shard-size", type=int, default=64)
+    parser.add_argument("--shard-size", type=int, choices=[64], default=64)
+    parser.add_argument(
+        "--puzzle-shard-size", type=int, choices=range(128, 257), default=PUZZLE_SHARD_SIZE
+    )
     args = parser.parse_args()
-    if min(args.workers, args.positions, args.shard_size) <= 0:
-        parser.error("workers, positions, and shard-size must be positive")
+    if min(args.workers, args.positions) <= 0:
+        parser.error("workers and positions must be positive")
     directory = args.data_dir.resolve()
-    metadata = json.loads((directory / "manifest.json").read_text())
-    source_positions = json.loads((directory / "positions.json").read_text())
+    with publication_lock(args.output):
+        expected_output = manifest_digest(args.output)
+    input_digests = {}
+
+    def read_input(name):
+        path = directory / name
+        raw = path.read_bytes()
+        input_digests[path] = hashlib.sha256(raw).hexdigest()
+        return json.loads(raw)
+
+    metadata = read_input("manifest.json")
+    source_positions = read_input("positions.json")
     catalog, puzzle_database = None, None
     puzzles, puzzle_keys = [], set()
     if args.puzzle_catalog:
         if args.puzzle_catalog.resolve() != args.output.resolve() or not args.puzzle_index:
             parser.error("puzzle-catalog must equal output and requires puzzle-index")
-        catalog = json.loads((args.puzzle_catalog / "manifest.json").read_text())
-        if catalog["schema"] != 2:
-            raise ValueError("Run import_puzzles.py before using the full puzzle catalog")
+        with frozen_catalog(args.puzzle_catalog) as frozen:
+            catalog = frozen.manifest
+            expected_output = frozen.manifest_sha256
+        if catalog["schema"] != 3 or "puzzle_import" not in catalog:
+            raise ValueError(
+                "Full schema-3 catalog required. Convert legacy catalogs explicitly with "
+                "package_corpus.py convert, or run import_puzzles.py."
+            )
         puzzle_database = sqlite3.connect(
             f"{args.puzzle_index.resolve().as_uri()}?mode=ro", uri=True
         )
@@ -331,10 +246,7 @@ def main():
         if index_stats != catalog.get("puzzle_import"):
             raise ValueError("Puzzle catalog and overlap index do not describe the same archive")
     else:
-        source_puzzles = json.loads((directory / "puzzles.json").read_text())
-        puzzles = [
-            {key: p[key] for key in ("id", "fen", "moves", "rating", "url")} for p in source_puzzles
-        ]
+        puzzles = read_input("puzzles.json")
         for puzzle in puzzles:
             board = chess.Board(puzzle["fen"])
             board.push_uci(puzzle["moves"][0])
@@ -351,6 +263,15 @@ def main():
                 is not None
             )
         return key in puzzle_keys
+
+    games_path = directory / "games.pgn"
+    if games_path.exists():
+        input_digests[games_path] = file_digest(games_path)
+
+    def check_source_inputs():
+        for path, expected in input_digests.items():
+            if file_digest(path) != expected:
+                raise ValueError(f"Authoring input changed during grading: {path}; retry")
 
     nodes = args.nodes if args.nodes is not None else metadata["nodes"]
     if nodes <= 0:
@@ -457,6 +378,9 @@ def main():
         args.shard_size,
         compact_ratings=bool(catalog),
         puzzle_group=catalog["puzzles"] if catalog else None,
+        puzzle_shard_size=args.puzzle_shard_size,
+        expected_manifest_digest=expected_output,
+        pre_promote=check_source_inputs,
     )
     if puzzle_database:
         puzzle_database.close()

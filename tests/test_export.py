@@ -10,6 +10,7 @@ import pytest
 import export_static
 from engine import Line
 from export_static import candidates, evaluate, export_assets, grade_position
+from training_assets import read_inventory
 
 
 class FakeEngine:
@@ -135,18 +136,20 @@ def test_shards_are_deterministic_hashed_and_exactly_indexed(source, tmp_path):
     ]
     positions = [grade_position(source, FakeEngine())]
     metadata = {"engine": "Fixture", "nodes": 100000, "sampled_games": 2000}
-    first = export_assets(tmp_path, puzzles, positions, metadata, shard_size=2)
+    first = export_assets(tmp_path, puzzles, positions, metadata)
+    assert first["schema"] == 3
     assert first["puzzles"]["count"] == 3
-    assert first["puzzles"]["shards"][0]["ratings"] == [1400, 1700]
-    assert first["puzzles"]["shards"][1]["ratings"] == [2000]
-    for shard in first["puzzles"]["shards"]:
-        records = json.loads(gzip.decompress((tmp_path / shard["file"]).read_bytes()))
+    assert first["puzzles"]["rating_counts"] == [[1400, 1], [1700, 1], [2000, 1]]
+    inventory = read_inventory(tmp_path, first["puzzles"], "puzzles")
+    base = tmp_path / "puzzles" / first["puzzles"]["version"]
+    for shard in inventory["shards"]:
+        records = json.loads(gzip.decompress((base / shard["path"]).read_bytes()))
         assert len(records) == shard["count"]
-    assert first == export_assets(tmp_path, puzzles, positions, metadata, shard_size=2)
+    assert first == export_assets(tmp_path, puzzles, positions, metadata)
     orphan = tmp_path / "old.json.gz"
     orphan.write_bytes(b"old")
-    export_assets(tmp_path, puzzles, positions, metadata, shard_size=2)
-    assert not orphan.exists()
+    export_assets(tmp_path, puzzles, positions, metadata)
+    assert orphan.read_bytes() == b"old"  # Published files are never garbage-collected.
     assert json.loads((tmp_path / "manifest.json").read_text()) == first
 
 
