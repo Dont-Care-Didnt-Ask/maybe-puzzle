@@ -11,8 +11,12 @@ import json
 import os
 import random
 import signal
+import sqlite3
 import sys
+import tempfile
+import threading
 from concurrent.futures import FIRST_COMPLETED, ProcessPoolExecutor, wait
+from contextlib import contextmanager
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -24,6 +28,31 @@ from prepare import ROOT, position_key, save_json
 
 VERSION = 1
 _WORKER_ENGINE = None
+_PUBLICATION_LOCKS = threading.local()
+
+
+@contextmanager
+def publication_lock(output: Path):
+    """Serialize publication/snapshot reads, without blocking engine evaluations."""
+    import fcntl
+
+    key = str(output.resolve())
+    held = getattr(_PUBLICATION_LOCKS, "held", None)
+    if held is None:
+        held = _PUBLICATION_LOCKS.held = set()
+    if key in held:
+        yield
+        return
+    name = hashlib.sha256(key.encode()).hexdigest()
+    path = Path(tempfile.gettempdir()) / f"chess-training-publication-{name}.lock"
+    with path.open("a") as stream:
+        fcntl.flock(stream, fcntl.LOCK_EX)
+        held.add(key)
+        try:
+            yield
+        finally:
+            held.remove(key)
+            fcntl.flock(stream, fcntl.LOCK_UN)
 
 
 def encoded(value) -> bytes:
@@ -109,6 +138,31 @@ def evaluate(source: dict, config: dict, checkpoint_dir: str) -> dict:
     return {**result, "cached": False}
 
 
+def seed_published_grades(positions, published_config, config, checkpoints: Path) -> int:
+    """Reuse already published complete grades only at the identical engine/budget.
+
+    Their fingerprints still include the full candidate and exporter configuration;
+    a changed engine, budget, or source cannot accidentally reuse these grades.
+    """
+    if published_config != config:
+        return 0
+    seeded = 0
+    for record in positions:
+        if "scores" not in record:
+            continue
+        board = chess.Board(record["fen"])
+        board.push_uci(record["moves"][0])
+        if set(record["scores"]) != {move.uci() for move in board.legal_moves}:
+            raise ValueError("Published position has incomplete move grades")
+        source = {key: record[key] for key in ("id", "fen", "moves", "url")}
+        fingerprint = digest({"config": config, "source": source})
+        path = checkpoints / f"{fingerprint}.json"
+        if not path.exists():
+            save_json(path, {"fingerprint": fingerprint, "record": record})
+            seeded += 1
+    return seeded
+
+
 def candidates(
     directory: Path, positions: list, seed: int, min_rating=1800, min_ply=20, max_ply=160
 ):
@@ -162,16 +216,44 @@ def candidates(
     yield from deferred
 
 
-def export_assets(output: Path, puzzles: list, positions: list, metadata: dict, shard_size=64):
-    """Write hashed shards before the manifest. Old versions are safe to clean afterward."""
+def _export_assets(
+    output: Path,
+    puzzles,
+    positions,
+    metadata: dict,
+    shard_size=64,
+    *,
+    compact_ratings=False,
+    puzzle_shard_size=None,
+    puzzle_group=None,
+):
+    """Stream hashed shards; schema 2 groups puzzles by one exact rating per shard.
+
+    puzzle_group can reuse an already published catalog in this same output directory.
+    The manifest is replaced last, and unreferenced shards are removed afterward.
+    """
     output.mkdir(parents=True, exist_ok=True)
-    referenced = set()
+    referenced = {s["file"] for s in puzzle_group["shards"]} if puzzle_group else set()
 
     def shards(records, prefix, ratings=False):
-        result = []
-        for offset in range(0, len(records), shard_size):
-            batch = records[offset : offset + shard_size]
-            content = gzip.compress(encoded(batch), mtime=0)
+        result, total = [], 0
+        size = (puzzle_shard_size or shard_size) if ratings else shard_size
+
+        def batches():
+            batch = []
+            for record in records:
+                if batch and (
+                    len(batch) == size
+                    or (ratings and compact_ratings and record["rating"] != batch[0]["rating"])
+                ):
+                    yield batch
+                    batch = []
+                batch.append(record)
+            if batch:
+                yield batch
+
+        for batch in batches():
+            content = gzip.compress(encoded(batch), compresslevel=6, mtime=0)
             name = f"{prefix}-{hashlib.sha256(content).hexdigest()[:20]}.json.gz"
             path = output / name
             if not path.exists():
@@ -181,15 +263,19 @@ def export_assets(output: Path, puzzles: list, positions: list, metadata: dict, 
             referenced.add(name)
             entry = {"file": name, "count": len(batch)}
             if ratings:
-                entry["ratings"] = [p["rating"] for p in batch]
+                if compact_ratings:
+                    entry["rating"] = batch[0]["rating"]
+                else:
+                    entry["ratings"] = [p["rating"] for p in batch]
             result.append(entry)
-        return {"count": len(records), "shards": result}
+            total += len(batch)
+        return {"count": total, "shards": result}
 
     manifest = {
-        "schema": 1,
+        "schema": 2 if compact_ratings else 1,
         "tolerance_cp": 50,
         **metadata,
-        "puzzles": shards(puzzles, "p", ratings=True),
+        "puzzles": puzzle_group or shards(puzzles, "p", ratings=True),
         "ordinary": shards(positions, "n"),
     }
     manifest["dataset_id"] = digest(manifest)[:20]
@@ -200,12 +286,26 @@ def export_assets(output: Path, puzzles: list, positions: list, metadata: dict, 
     return manifest
 
 
+def export_assets(output: Path, *args, **kwargs):
+    """Publish a complete manifest/shard set under the shared publication lock."""
+    with publication_lock(output):
+        return _export_assets(output, *args, **kwargs)
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--data-dir", type=Path, default=ROOT / "data")
     parser.add_argument("--output", type=Path, default=ROOT / "public/training")
     parser.add_argument("--workers", type=int, default=min(3, os.cpu_count() or 1))
     parser.add_argument("--positions", type=int, default=1000)
+    parser.add_argument(
+        "--puzzle-catalog",
+        type=Path,
+        help="Reuse puzzles already published in --output (no re-import)",
+    )
+    parser.add_argument(
+        "--puzzle-index", type=Path, help="Full-archive SQLite overlap index from import_puzzles.py"
+    )
     parser.add_argument("--nodes", type=int, help="Default: source preparation budget")
     parser.add_argument("--shard-size", type=int, default=64)
     args = parser.parse_args()
@@ -214,17 +314,44 @@ def main():
     directory = args.data_dir.resolve()
     metadata = json.loads((directory / "manifest.json").read_text())
     source_positions = json.loads((directory / "positions.json").read_text())
-    source_puzzles = json.loads((directory / "puzzles.json").read_text())
-    puzzles = [
-        {key: p[key] for key in ("id", "fen", "moves", "rating", "url")} for p in source_puzzles
-    ]
-    puzzle_keys = set()
-    for puzzle in puzzles:
-        board = chess.Board(puzzle["fen"])
-        board.push_uci(puzzle["moves"][0])
-        puzzle_keys.add(position_key(board))
-        for uci in puzzle["moves"][1:]:
-            board.push_uci(uci)
+    catalog, puzzle_database = None, None
+    puzzles, puzzle_keys = [], set()
+    if args.puzzle_catalog:
+        if args.puzzle_catalog.resolve() != args.output.resolve() or not args.puzzle_index:
+            parser.error("puzzle-catalog must equal output and requires puzzle-index")
+        catalog = json.loads((args.puzzle_catalog / "manifest.json").read_text())
+        if catalog["schema"] != 2:
+            raise ValueError("Run import_puzzles.py before using the full puzzle catalog")
+        puzzle_database = sqlite3.connect(
+            f"{args.puzzle_index.resolve().as_uri()}?mode=ro", uri=True
+        )
+        index_stats = json.loads(
+            puzzle_database.execute("SELECT value FROM metadata").fetchone()[0]
+        )
+        if index_stats != catalog.get("puzzle_import"):
+            raise ValueError("Puzzle catalog and overlap index do not describe the same archive")
+    else:
+        source_puzzles = json.loads((directory / "puzzles.json").read_text())
+        puzzles = [
+            {key: p[key] for key in ("id", "fen", "moves", "rating", "url")} for p in source_puzzles
+        ]
+        for puzzle in puzzles:
+            board = chess.Board(puzzle["fen"])
+            board.push_uci(puzzle["moves"][0])
+            puzzle_keys.add(position_key(board))
+            for uci in puzzle["moves"][1:]:
+                board.push_uci(uci)
+
+    def overlaps_puzzle(key):
+        if puzzle_database:
+            return (
+                puzzle_database.execute(
+                    "SELECT 1 FROM puzzles WHERE position_key=? LIMIT 1", (key,)
+                ).fetchone()
+                is not None
+            )
+        return key in puzzle_keys
+
     nodes = args.nodes if args.nodes is not None else metadata["nodes"]
     if nodes <= 0:
         parser.error("nodes must be positive")
@@ -234,7 +361,14 @@ def main():
     config = {"version": VERSION, "nodes": nodes, "engine": engine_name, "tolerance_cp": 50}
     checkpoints = directory / "static-checkpoints"
     checkpoints.mkdir(exist_ok=True)
-    accepted, used_games, used_keys = [], set(), set(puzzle_keys)
+    seeded = seed_published_grades(
+        source_positions, metadata.get("source_grading"), config, checkpoints
+    )
+    if seeded:
+        print(
+            f"Reusing {seeded:,} published complete grades at identical engine/budget", flush=True
+        )
+    accepted, used_games, used_keys = [], set(), set()
     source = iter(
         candidates(
             directory,
@@ -277,7 +411,11 @@ def main():
                     board.push_uci(record["moves"][0])
                     key = position_key(board)
                     game_id = record["url"].split("#")[0]
-                    if key not in used_keys and (not game_id or game_id not in used_games):
+                    if (
+                        key not in used_keys
+                        and not overlaps_puzzle(key)
+                        and (not game_id or game_id not in used_games)
+                    ):
                         accepted.append(record)
                         used_keys.add(key)
                         if game_id:
@@ -314,9 +452,14 @@ def main():
             "source_prepared_at": metadata["prepared_at"],
             "min_ply": metadata.get("min_ply", 20),
             "max_ply": metadata.get("max_ply", 160),
+            **({"puzzle_import": catalog["puzzle_import"]} if catalog else {}),
         },
         args.shard_size,
+        compact_ratings=bool(catalog),
+        puzzle_group=catalog["puzzles"] if catalog else None,
     )
+    if puzzle_database:
+        puzzle_database.close()
     print(
         f"Published {manifest['puzzles']['count']} puzzles and "
         f"{manifest['ordinary']['count']} ordinary positions to {args.output}",
