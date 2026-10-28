@@ -8,17 +8,22 @@ import { ordinary, puzzle, START } from './fixtures.js';
 
 const directory = 'dist/training';
 const manifest = JSON.parse(fs.readFileSync(path.join(directory, 'manifest.json')));
-function records(group) {
-  return manifest[group].shards.flatMap((shard) => JSON.parse(new TextDecoder().decode(gunzipSync(fs.readFileSync(path.join(directory, shard.file))))));
-}
 function initialFen(record) {
   const board = new Chess(record.fen);
   chessMove(board, record.moves[0]);
   return board.fen();
 }
-const puzzles = new Map(records('puzzles').map((p) => [initialFen(p), p]));
-const positions = new Map(records('ordinary').map((p) => [initialFen(p), p]));
 let errors, forbidden, requests;
+function sourceFor(kind, fen) {
+  const group = manifest[kind === 'puzzle' ? 'puzzles' : 'ordinary'];
+  const fetched = new Set(requests.map((url) => path.basename(url)));
+  for (const shard of group.shards) {
+    if (!fetched.has(shard.file)) continue;
+    const records = JSON.parse(new TextDecoder().decode(gunzipSync(fs.readFileSync(path.join(directory, shard.file)))));
+    const record = records.find((record) => initialFen(record) === fen);
+    if (record) return record;
+  }
+}
 
 test.beforeEach(async ({ page }) => {
   errors = []; forbidden = []; requests = [];
@@ -89,9 +94,11 @@ test('startup is lazy, subpath-safe, and stores no session data', async ({ page 
   expect(requests.filter((url) => url.endsWith('/manifest.json'))).toHaveLength(1);
   expect(await page.evaluate(() => ({ local: localStorage.length, session: sessionStorage.length, cookies: document.cookie })))
     .toEqual({ local: 0, session: 0, cookies: '' });
-  const source = await page.request.get('./source.zip');
+  const source = await page.request.head('./source.zip');
   expect(source.ok()).toBeTruthy();
-  const files = Object.keys(unzipSync(new Uint8Array(await source.body())));
+  const files = [];
+  // Read only ZIP headers; don't inflate a second copy of millions of puzzles.
+  unzipSync(fs.readFileSync('dist/source.zip'), { filter: (file) => { files.push(file.name); return false; } });
   expect(files).toContain('chess-puzzle-not-puzzle/web/session.js');
   expect(files).toContain('chess-puzzle-not-puzzle/export_static.py');
   expect(files.some((file) => /static-checkpoints|games\.pgn|\/cache\//.test(file))).toBe(false);
@@ -105,7 +112,7 @@ test('startup is lazy, subpath-safe, and stores no session data', async ({ page 
 test('ordinary position: board input, immediate grade, next, and finish', async ({ page }) => {
   const fen = await start(page, 0);
   await expect(page.locator('#item-info')).toBeHidden();
-  const source = positions.get(fen);
+  const source = sourceFor('ordinary', fen);
   expect(source).toBeTruthy();
   await clickMove(page, source.line[0]);
   if (source.line[0].length === 5) {
@@ -127,7 +134,7 @@ test('ordinary position: board input, immediate grade, next, and finish', async 
 
 test('real puzzle: complete line, automatic replies, replay, and summary', async ({ page }) => {
   const fen = await start(page, 100);
-  const source = puzzles.get(fen);
+  const source = sourceFor('puzzle', fen);
   expect(source).toBeTruthy();
   for (let cursor = 1; cursor < source.moves.length; cursor += 2) await play(page, source.moves[cursor]);
   await expect(page.locator('#feedback')).toContainText('Well played.');
@@ -140,11 +147,28 @@ test('real puzzle: complete line, automatic replies, replay, and summary', async
   await expect(page.locator('#overall-rate')).toHaveText('100.0%');
 });
 
+test('the complete catalog supports an exact 2400 rating session', async ({ page }) => {
+  await page.goto('./');
+  await expect(page.locator('#start')).toBeEnabled();
+  await page.locator('[name=ratio_mode][value=fixed]').check();
+  await page.locator('#fraction').evaluate((input) => { input.value = '100'; input.dispatchEvent(new Event('input', { bubbles: true })); });
+  await page.locator('#anchor').fill('2400');
+  await page.locator('#margin').fill('0');
+  await page.locator('#start').click();
+  await expect(page.locator('#training')).toBeVisible();
+  await expect(page.locator('#next')).toBeEnabled();
+  const source = sourceFor('puzzle', await page.locator('#board').getAttribute('data-fen'));
+  expect(source.rating).toBe(2400);
+  await expect(page.locator('#item-info')).toBeHidden();
+  await page.locator('#reveal').click();
+  await expect(page.locator('#item-info')).toContainText('2400');
+});
+
 test('random fraction stays out of the UI until finish; reload starts fresh', async ({ page }) => {
   await start(page);
   await expect(page.locator('#session-mixture')).toHaveText('Puzzle probability: hidden until you finish');
   await page.locator('#finish').click();
-  await expect(page.locator('#revealed-fraction')).toHaveText(/\d+\.\d{2}%/);
+  await expect(page.locator('#revealed-fraction')).toHaveText('Varies');
   await expect(page.locator('#overall-rate')).toHaveText('—');
   await page.locator('#again').click();
   await expect(page.locator('#setup')).toBeVisible();

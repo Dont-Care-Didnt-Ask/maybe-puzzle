@@ -12,6 +12,32 @@ async function readResource(fetcher, url, read, options = {}, timeoutMs = 10_000
   } finally { clearTimeout(timer); }
 }
 
+// A virtual pool: one range per matching shard, not one object per puzzle.
+export class ReferencePool {
+  constructor(kind, shards, settings) {
+    this.kind = kind;
+    this.ranges = [];
+    this.length = 0;
+    shards.forEach((shard, index) => {
+      if (kind === 'puzzle' && Math.abs(shard.rating - settings.anchor_rating) > settings.rating_margin) return;
+      this.ranges.push({ shard: index, start: this.length, end: this.length + shard.count });
+      this.length += shard.count;
+    });
+  }
+
+  at(index) {
+    assert(Number.isInteger(index) && index >= 0 && index < this.length, 'invalid pool index');
+    let low = 0, high = this.ranges.length - 1;
+    while (low < high) {
+      const middle = Math.floor((low + high) / 2);
+      if (index < this.ranges[middle].end) high = middle;
+      else low = middle + 1;
+    }
+    const range = this.ranges[low];
+    return { kind: this.kind, shard: range.shard, row: index - range.start };
+  }
+}
+
 export class Catalog {
   constructor(manifest, base, fetcher = fetch, cacheSize = 8, timeoutMs = 10_000) {
     this.manifest = validateManifest(manifest);
@@ -33,6 +59,7 @@ export class Catalog {
 
   refs(kind, settings) {
     const group = this.manifest[kind === 'puzzle' ? 'puzzles' : 'ordinary'];
+    if (this.manifest.schema === 2) return new ReferencePool(kind, group.shards, settings);
     const result = [];
     group.shards.forEach((shard, index) => {
       for (let row = 0; row < shard.count; row++) {
@@ -70,7 +97,7 @@ export class Catalog {
     try {
       const record = (await pending)[ref.row];
       validateRecord(record, ref.kind);
-      if (ref.kind === 'puzzle') assert(record.rating === shard.ratings[ref.row], 'rating index mismatch');
+      if (ref.kind === 'puzzle') assert(record.rating === (this.manifest.schema === 2 ? shard.rating : shard.ratings[ref.row]), 'rating index mismatch');
       return record;
     } catch (error) {
       if (this.cache.get(shard.file) === pending) this.cache.delete(shard.file);

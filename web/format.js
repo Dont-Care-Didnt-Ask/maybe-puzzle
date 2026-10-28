@@ -5,7 +5,7 @@ export function assert(condition, message) {
 }
 
 export function validateManifest(manifest) {
-  assert(manifest.schema === 1 && manifest.tolerance_cp === 50, 'unsupported schema or threshold');
+  assert([1, 2].includes(manifest.schema) && manifest.tolerance_cp === 50, 'unsupported schema or threshold');
   assert(typeof manifest.dataset_id === 'string' && manifest.dataset_id.length > 0, 'missing dataset ID');
   assert(typeof manifest.engine === 'string' && manifest.engine.length > 0, 'missing engine name');
   assert(Number.isInteger(manifest.nodes) && manifest.nodes > 0, 'invalid search budget');
@@ -22,8 +22,11 @@ export function validateManifest(manifest) {
       files.add(shard.file);
       assert(Number.isInteger(shard.count) && shard.count > 0, 'invalid shard size');
       if (kind === 'puzzles') {
-        assert(Array.isArray(shard.ratings) && shard.ratings.length === shard.count, 'missing rating index');
-        assert(shard.ratings.every(Number.isInteger), 'invalid rating');
+        if (manifest.schema === 2) assert(Number.isInteger(shard.rating), 'missing exact shard rating');
+        else {
+          assert(Array.isArray(shard.ratings) && shard.ratings.length === shard.count, 'missing rating index');
+          assert(shard.ratings.every(Number.isInteger), 'invalid rating');
+        }
       }
       total += shard.count;
     }
@@ -31,6 +34,17 @@ export function validateManifest(manifest) {
   }
   assert(manifest.sampled_games >= manifest.ordinary.count, 'more ordinary positions than source games');
   return manifest;
+}
+
+export function validatePuzzleShape(record, requireKey = false) {
+  assert(record && typeof record.id === 'string' && record.id.length > 0, 'missing ID');
+  assert(typeof record.fen === 'string' && /^[prnbqkPRNBQK1-8/]+ [wb] (?:-|[KQkq]+) (?:-|[a-h][36]) \d+ [1-9]\d*$/.test(record.fen), 'invalid puzzle FEN');
+  assert(Number.isInteger(record.rating) && Array.isArray(record.moves) && record.moves.length >= 2
+    && record.moves.every((move) => typeof move === 'string' && /^[a-h][1-8][a-h][1-8][qrbn]?$/.test(move)), 'invalid puzzle');
+  assert(record.url === undefined || typeof record.url === 'string', 'invalid source URL');
+  if (requireKey || record.position_key !== undefined) {
+    assert(typeof record.position_key === 'string' && /^[prnbqkPRNBQK1-8/]+ [wb] (?:-|[KQkq]+) (?:-|[a-h][36])$/.test(record.position_key), 'missing/invalid puzzle position key');
+  }
 }
 
 export function validateRecord(record, kind) {
@@ -41,7 +55,8 @@ export function validateRecord(record, kind) {
   const board = new Chess(record.fen);
   play(board, record.moves[0]);
   if (kind === 'puzzle') {
-    assert(Number.isInteger(record.rating) && record.moves.length >= 2, 'invalid puzzle');
+    validatePuzzleShape(record);
+    if (record.position_key !== undefined) assert(record.position_key === board.fen().split(' ').slice(0, 4).join(' '), 'puzzle position key mismatch');
     for (const uci of record.moves.slice(1)) play(board, uci);
     return;
   }

@@ -24,24 +24,29 @@ export class Deck {
   constructor(pool, random = randomFraction) {
     this.pool = pool;
     this.random = random;
-    this.remaining = [];
+    this.remaining = 0;
+    this.swaps = new Map();
     this.last = null;
   }
 
   draw() {
     if (!this.pool.length) fail('No positions available in this group.');
-    if (!this.remaining.length) {
-      this.remaining = [...this.pool];
-      for (let i = this.remaining.length - 1; i > 0; i--) {
-        const j = Math.floor(this.random() * (i + 1));
-        [this.remaining[i], this.remaining[j]] = [this.remaining[j], this.remaining[i]];
-      }
-      if (this.remaining.length > 1 && this.remaining.at(-1) === this.last) {
-        [this.remaining[0], this.remaining[this.remaining.length - 1]] = [this.remaining.at(-1), this.remaining[0]];
-      }
+    const newCycle = this.remaining === 0;
+    if (newCycle) {
+      this.remaining = this.pool.length;
+      this.swaps.clear();
     }
-    this.last = this.remaining.pop();
-    return this.last;
+    // Lazy Fisher–Yates: exact uniform draws without allocating/shuffling millions
+    // of references at session startup. Memory grows only with positions drawn.
+    let slot = this.remaining === 1 ? 0 : Math.floor(this.random() * (
+      newCycle && this.last !== null ? this.remaining - 1 : this.remaining));
+    if (newCycle && this.last !== null && this.remaining > 1 && slot >= this.last) slot++;
+    const index = this.swaps.get(slot) ?? slot;
+    const tail = --this.remaining;
+    if (slot !== tail) this.swaps.set(slot, this.swaps.get(tail) ?? tail);
+    this.swaps.delete(tail);
+    this.last = index;
+    return this.pool.at(index);
   }
 }
 

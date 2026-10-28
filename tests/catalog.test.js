@@ -3,7 +3,8 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { Catalog } from '../web/catalog.js';
+import { Catalog, ReferencePool } from '../web/catalog.js';
+import { Deck } from '../web/session.js';
 import { validateManifest, validateRecord } from '../web/format.js';
 import { validateData } from '../scripts/validate-data.mjs';
 import { makeAssets } from './data-fixtures.js';
@@ -154,6 +155,48 @@ test('build validator verifies gzip hashes, legality, rating index, and overlaps
     assert.throws(() => validateData(directory), /hash mismatch/);
     const overlapping = makeAssets([puzzle], [ordinary()]);
     for (const [name, bytes] of overlapping.files) fs.writeFileSync(path.join(directory, name), bytes);
+    assert.throws(() => validateData(directory), /overlapping/);
+  } finally { fs.rmSync(directory, { recursive: true, force: true }); }
+});
+
+test('schema 2 exact rating ranges stay compact and fetch only the selected shard', async () => {
+  const puzzles = [2099, 2100, 2400, 2400, 2700, 2701].map((rating, id) => ({ ...puzzle, id: String(id), rating }));
+  const { manifest, files } = makeAssets(puzzles, [ordinary()], 2, true);
+  const calls = [];
+  const catalog = new Catalog(manifest, base, fetchAssets(files, calls));
+  const refs = catalog.refs('puzzle', { anchor_rating: 2400, rating_margin: 300 });
+  assert(refs instanceof ReferencePool);
+  assert.equal(refs.length, 4);
+  assert.equal(refs.ranges.length, 3);
+  assert.deepEqual(refs.at(0), { kind: 'puzzle', shard: 1, row: 0 });
+  assert.equal((await catalog.get(refs.at(1))).rating, 2400);
+  assert.equal(calls.length, 1);
+  assert.equal(catalog.refs('puzzle', { anchor_rating: 2400, rating_margin: 0 }).length, 2);
+  assert.equal(catalog.refs('puzzle', { anchor_rating: 3500, rating_margin: 0 }).length, 0);
+  assert.throws(() => refs.at(4), /invalid pool index/);
+  delete manifest.puzzles.shards[0].rating;
+  assert.throws(() => validateManifest(manifest), /exact shard rating/);
+});
+
+test('a multi-million-puzzle pool and deck allocate only ranges and drawn swaps', () => {
+  const pool = new ReferencePool('puzzle', [{ rating: 2400, count: 6_000_000 }], { anchor_rating: 2400, rating_margin: 0 });
+  const deck = new Deck(pool, () => 0.4);
+  const drawn = new Set(Array.from({ length: 1000 }, () => deck.draw().row));
+  assert.equal(drawn.size, 1000);
+  assert.equal(pool.ranges.length, 1);
+  assert(deck.swaps.size <= 1000);
+  assert.equal(deck.remaining, pool.length - 1000);
+});
+
+test('schema 2 build checks cover hashes, exact ratings, overlaps, and optional deep replay', () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'cpnp-full-'));
+  try {
+    const { files } = makeAssets([puzzle], undefined, 2, true);
+    for (const [name, bytes] of files) fs.writeFileSync(path.join(directory, name), bytes);
+    assert.equal(validateData(directory).manifest.schema, 2);
+    assert.equal(validateData(directory, { deep: true }).manifest.puzzles.count, 1);
+    const bad = makeAssets([puzzle], [ordinary()], 2, true);
+    for (const [name, bytes] of bad.files) fs.writeFileSync(path.join(directory, name), bytes);
     assert.throws(() => validateData(directory), /overlapping/);
   } finally { fs.rmSync(directory, { recursive: true, force: true }); }
 });
